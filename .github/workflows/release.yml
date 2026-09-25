@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  workflow_dispatch: # manual build from the Actions tab: archives as run artifacts, no release
+  push:
+    tags: ['v*'] # e.g. v0.1.0 -> builds and publishes a GitHub Release
+
+permissions:
+  contents: write # needed to create the release on tag builds
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      # musl gives a static binary that runs on any Linux of the same architecture.
+      - name: Install musl and cmake
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      # The layout install.sh expects: the binary next to it and no Cargo.toml.
+      - name: Package
+        run: |
+          mkdir -p out/pnl-bot/deploy
+          cp "target/$TARGET/release/pnl-bot" install.sh .env.example README.md out/pnl-bot/
+          cp deploy/pnl-bot.service out/pnl-bot/deploy/
+          chmod 755 out/pnl-bot/pnl-bot out/pnl-bot/install.sh
+          file out/pnl-bot/pnl-bot
+          tar -C out -czf "pnl-bot-linux-${{ matrix.arch }}.tar.gz" pnl-bot
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pnl-bot-linux-${{ matrix.arch }}
+          path: pnl-bot-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum pnl-bot-linux-*.tar.gz > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" pnl-bot-linux-*.tar.gz SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

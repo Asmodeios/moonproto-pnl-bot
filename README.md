@@ -53,21 +53,24 @@ Reports use the core's clock. If your cores do not run on UTC, set `REPORT_UTC_O
 ## Install on a VPS
 
 1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token it gives you.
-2. On the VPS (Ubuntu 22.04 or 24.04), get this folder and run the installer:
+2. From the [latest release](https://github.com/Asmodeios/moonproto-pnl-bot/releases/latest), download the
+   archive for the VPS's architecture (`uname -m`): `pnl-bot-linux-x86_64.tar.gz` or `pnl-bot-linux-aarch64.tar.gz`.
+   Copy it to the VPS (`scp pnl-bot-linux-x86_64.tar.gz user@VPS_IP:~`), or download it there with
+   `gh release download --repo Asmodeios/moonproto-pnl-bot --pattern 'pnl-bot-linux-x86_64.tar.gz'`.
+3. On the VPS (Ubuntu 22.04 or 24.04), unpack it and run the installer:
 
    ```sh
-   sudo apt update && sudo apt install -y git
-   git clone https://github.com/Asmodeios/moonproto-pnl-bot.git && cd moonproto-pnl-bot
+   tar -xzf pnl-bot-linux-x86_64.tar.gz && cd pnl-bot
    sudo ./install.sh
    ```
 
-   The installer installs Rust, builds the bot, asks for the token, and starts the service.
-   The first build takes several minutes.
-3. The installer prints a link like `https://t.me/your_bot?start=…`. Open it in Telegram and
+   The installer asks for the token and starts the service. The binary is prebuilt and static,
+   so nothing is compiled on the VPS.
+4. The installer prints a link like `https://t.me/your_bot?start=…`. Open it in Telegram and
    press **Start**. Whoever opens it first becomes the owner, for good. Nobody else can use the bot after that.
-4. In the bot, go to **🖥 Cores → ➕ Add core** and add your cores.
+5. In the bot, go to **🖥 Cores → ➕ Add core** and add your cores.
 
-To update, pull the new code and run `sudo ./install.sh` again. It keeps the token, the owner and the cores.
+To update, unpack a newer release the same way and run `sudo ./install.sh` again. It keeps the token, the owner and the cores.
 
 If you know your numeric Telegram user id, you can set `OWNER_ID` in `/etc/pnl-bot.env` instead of
 using the link. A restart while the bot has no owner prints a new link:
@@ -76,15 +79,13 @@ using the link. A restart while the bot has no owner prints a new link:
 ## Requirements
 
 - Ubuntu 22.04 or 24.04 LTS (any recent x86_64 or arm64 Linux works).
-- About 2 GB of RAM to build. On a 1 GB VPS, add swap first
-  (`sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`).
-  Once built, the bot uses a few tens of MB.
+- The bot uses a few tens of MB of RAM. Building from source needs about 2 GB.
 - The cores' MoonProto UDP port must be reachable from the server. The bot opens no ports of its own.
 - A bot token from [@BotFather](https://t.me/BotFather).
 
 ## Manual build and install
 
-`install.sh` does all of this. To do it by hand, build on the server or on any Linux machine with the same architecture:
+Run from a source checkout instead of a release archive, `install.sh` builds the bot itself. To do it by hand, build on the server or on any Linux machine with the same architecture:
 
 ```sh
 sudo apt update && sudo apt install -y build-essential pkg-config git curl
@@ -111,6 +112,13 @@ journalctl -u pnl-bot -f              # logs
 The unit runs the bot as a throwaway system user. Its data lives in `/var/lib/pnl-bot`: `cores.json`
 (the owner, and the cores with their keys) and `reports/*.sqlite3`. Only root and that user can read it.
 Leave `DATA_DIR` out of the env file, because a value there overrides the unit's.
+
+## Releasing
+
+Bump `version` in `Cargo.toml`, commit, then tag it and push the tag: `git tag v0.1.1 && git push origin v0.1.1`.
+The [Release workflow](.github/workflows/release.yml) builds static x86_64 and aarch64 binaries, packs each with
+the installer, and publishes them with `SHA256SUMS` as a GitHub Release. It fails if the tag doesn't match `Cargo.toml`.
+Run it from the Actions tab to build the archives without releasing.
 
 ## Configuration
 
