@@ -1,6 +1,6 @@
 [package]
 name = "pnl-bot"
-version = "0.1.0"
+version = "0.1.1"
 description = "Telegram bot reporting PnL from MoonBot cores over MoonProto"
 authors = ["Asmodeios"]
 edition = "2021"
