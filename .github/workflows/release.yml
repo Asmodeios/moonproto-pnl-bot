@@ -54,7 +54,7 @@ jobs:
         run: |
           mkdir -p out/pnl-bot/deploy
           cp "target/$TARGET/release/pnl-bot" install.sh .env.example README.md out/pnl-bot/
-          cp deploy/pnl-bot.service out/pnl-bot/deploy/
+          cp deploy/pnl-bot.service deploy/pnl-bot-passphrase.sh deploy/pnl.sh out/pnl-bot/deploy/
           chmod 755 out/pnl-bot/pnl-bot out/pnl-bot/install.sh
           file out/pnl-bot/pnl-bot
           tar -C out -czf "pnl-bot-linux-${{ matrix.arch }}.tar.gz" pnl-bot

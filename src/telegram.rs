@@ -116,18 +116,14 @@ impl Tg {
     /// `send`, answering the new message's id.
     pub async fn send_id(&self, chat: i64, text: &str, keyboard: Option<Value>) -> Result<i64, String> {
         let mut body = json!({ "chat_id": chat, "text": text, "parse_mode": "HTML" });
-        if let Some(k) = keyboard {
-            body["reply_markup"] = json!({ "inline_keyboard": k });
-        }
+        with_keyboard(&mut body, keyboard);
         self.call::<Message>("sendMessage", body).await.map(|m| m.message_id)
     }
 
     /// Edit a message in place; an unchanged text is not an error.
     pub async fn edit(&self, chat: i64, message_id: i64, text: &str, keyboard: Option<Value>) -> Result<(), String> {
         let mut body = json!({ "chat_id": chat, "message_id": message_id, "text": text, "parse_mode": "HTML" });
-        if let Some(k) = keyboard {
-            body["reply_markup"] = json!({ "inline_keyboard": k });
-        }
+        with_keyboard(&mut body, keyboard);
         match self.call::<Value>("editMessageText", body).await {
             Err(e) if e.contains("message is not modified") => Ok(()),
             other => other.map(|_| ()),
@@ -137,9 +133,7 @@ impl Tg {
     /// Send a PNG as a photo, answering the new message's id.
     pub async fn send_photo(&self, chat: i64, png: Vec<u8>, caption: &str, keyboard: Option<Value>) -> Result<i64, String> {
         let mut fields = json!({ "chat_id": chat, "caption": caption, "parse_mode": "HTML" });
-        if let Some(k) = keyboard {
-            fields["reply_markup"] = json!({ "inline_keyboard": k });
-        }
+        with_keyboard(&mut fields, keyboard);
         self.call_upload::<Message>("sendPhoto", fields, png).await.map(|m| m.message_id)
     }
 
@@ -154,9 +148,7 @@ impl Tg {
     ) -> Result<(), String> {
         let media = json!({ "type": "photo", "media": "attach://photo", "caption": caption, "parse_mode": "HTML" });
         let mut fields = json!({ "chat_id": chat, "message_id": message_id, "media": media });
-        if let Some(k) = keyboard {
-            fields["reply_markup"] = json!({ "inline_keyboard": k });
-        }
+        with_keyboard(&mut fields, keyboard);
         self.call_upload::<Value>("editMessageMedia", fields, png).await.map(|_| ())
     }
 
@@ -186,6 +178,12 @@ impl Tg {
     pub async fn set_commands(&self, commands: &[(&str, &str)]) -> Result<(), String> {
         let list: Vec<Value> = commands.iter().map(|(c, d)| json!({ "command": c, "description": d })).collect();
         self.call::<Value>("setMyCommands", json!({ "commands": list })).await.map(|_| ())
+    }
+}
+
+fn with_keyboard(body: &mut Value, keyboard: Option<Value>) {
+    if let Some(k) = keyboard {
+        body["reply_markup"] = json!({ "inline_keyboard": k });
     }
 }
 

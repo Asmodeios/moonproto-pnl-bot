@@ -4,6 +4,10 @@
 //! The font is monospace, so a cell's width is its char count times one
 //! advance — no text measuring.
 
+use std::sync::{Arc, OnceLock};
+
+use resvg::usvg::fontdb;
+
 use crate::pnl::Tally;
 
 const REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
@@ -42,7 +46,15 @@ pub enum Kind {
     Total,
 }
 
+/// What a report's rows are: one per core, or one per day with a running total.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum By {
+    Core,
+    Date,
+}
+
 pub struct Row {
+    /// The core's name, or the day.
     pub name: String,
     /// The dim line under the name.
     pub sub: String,
@@ -50,6 +62,8 @@ pub struct Row {
     /// `None` shows dashes: no history yet, or it could not be read.
     pub tally: Option<Tally>,
     pub currency: String,
+    /// The profit summed up to this day, in a [`By::Date`] report.
+    pub cumulative: Option<f64>,
 }
 
 pub struct Report {
@@ -57,15 +71,24 @@ pub struct Report {
     pub label: String,
     pub updated: String,
     pub footer: String,
+    pub by: By,
     pub rows: Vec<Row>,
+}
+
+/// The built-in fonts, parsed once.
+fn fonts() -> &'static Arc<fontdb::Database> {
+    static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_font_source(fontdb::Source::Binary(Arc::new(REGULAR)));
+        db.load_font_source(fontdb::Source::Binary(Arc::new(BOLD)));
+        Arc::new(db)
+    })
 }
 
 pub fn render(report: &Report) -> Result<Vec<u8>, String> {
     let svg = svg(report);
-    let mut opt = resvg::usvg::Options::default();
-    let db = opt.fontdb_mut();
-    db.load_font_data(REGULAR.to_vec());
-    db.load_font_data(BOLD.to_vec());
+    let opt = resvg::usvg::Options { fontdb: Arc::clone(fonts()), ..Default::default() };
     let tree = resvg::usvg::Tree::from_str(&svg, &opt).map_err(|e| format!("report image: {e}"))?;
     let size = tree.size().to_int_size().scale_by(SCALE).ok_or("report image: bad size")?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height()).ok_or("report image: bad size")?;
@@ -80,15 +103,30 @@ pub struct Cells {
     avg: String,
     pub profit: String,
     pub pct: String,
+    /// Empty without a running total.
+    pub cumulative: String,
     sign: f64,
+    cumulative_sign: f64,
 }
 
 pub fn cells(row: &Row) -> Cells {
     let dash = || "—".to_string();
-    let Some(t) = row.tally else {
-        return Cells { orders: dash(), wl: dash(), volume: dash(), avg: dash(), profit: dash(), pct: dash(), sign: 0.0 };
-    };
     let unit = unit(&row.currency);
+    let cumulative = row.cumulative.map(|c| format!("{}{unit}", signed(c))).unwrap_or_default();
+    let cumulative_sign = row.cumulative.map_or(0.0, rounded);
+    let Some(t) = row.tally else {
+        return Cells {
+            orders: dash(),
+            wl: dash(),
+            volume: dash(),
+            avg: dash(),
+            profit: dash(),
+            pct: dash(),
+            cumulative,
+            sign: 0.0,
+            cumulative_sign,
+        };
+    };
     let avg = if t.trades > 0 { t.volume / f64::from(t.trades) } else { 0.0 };
     Cells {
         orders: t.trades.to_string(),
@@ -97,21 +135,69 @@ pub fn cells(row: &Row) -> Cells {
         avg: if t.trades > 0 { format!("{}{unit}", compact(avg)) } else { dash() },
         profit: format!("{}{unit}", signed(t.profit)),
         pct: t.pct().map(|p| format!("{}%", signed(p))).unwrap_or_else(dash),
-        sign: if t.profit.abs() < 0.005 { 0.0 } else { t.profit },
+        cumulative,
+        sign: rounded(t.profit),
+        cumulative_sign,
+    }
+}
+
+/// Green, red, or plain for a zero.
+fn money(sign: f64) -> &'static str {
+    if sign > 0.0 {
+        GREEN
+    } else if sign < 0.0 {
+        RED
+    } else {
+        NUM
+    }
+}
+
+/// A number cell: text, color, bold.
+type Column<'a> = (&'a str, &'static str, bool);
+
+/// A row's number cells, after its name.
+fn columns(by: By, total: bool, c: &Cells) -> Vec<Column<'_>> {
+    let profit = money(c.sign);
+    match by {
+        By::Core => vec![
+            (&c.orders, NUM, total),
+            (&c.wl, DIM, false),
+            (&c.volume, NUM, total),
+            (&c.avg, NUM, false),
+            (&c.profit, profit, true),
+            (&c.pct, profit, false),
+        ],
+        By::Date => vec![
+            (&c.orders, NUM, total),
+            (&c.wl, DIM, false),
+            (&c.volume, NUM, total),
+            (&c.profit, profit, true),
+            (&c.pct, profit, false),
+            (&c.cumulative, money(c.cumulative_sign), false),
+        ],
     }
 }
 
 fn svg(report: &Report) -> String {
-    let heads = ["CORE", "ORDERS", "W/L", "VOLUME", "AVG ORDER", "PROFIT", "%"];
-    let rows: Vec<(&Row, Cells)> = report.rows.iter().map(|r| (r, cells(r))).collect();
+    let heads: &[&str] = match report.by {
+        By::Core => &["CORE", "ORDERS", "W/L", "VOLUME", "AVG ORDER", "PROFIT", "%"],
+        By::Date => &["DAY", "ORDERS", "W/L", "VOLUME", "PROFIT", "%", "CUMULATIVE"],
+    };
+    let cells: Vec<Cells> = report.rows.iter().map(cells).collect();
+    let rows: Vec<(&Row, Vec<Column>)> = report
+        .rows
+        .iter()
+        .zip(&cells)
+        .map(|(r, c)| (r, columns(report.by, matches!(r.kind, Kind::Total), c)))
+        .collect();
 
     let body_w = |s: &str| s.chars().count() as f64 * BODY * ADVANCE;
     let head_w = |s: &str| s.chars().count() as f64 * (HEAD * ADVANCE + HEAD_SPACING);
     let mut widths: Vec<f64> = heads.iter().map(|h| head_w(h)).collect();
-    for (row, c) in &rows {
-        let name = body_w(&row.name).max(row.sub.chars().count() as f64 * SUB * ADVANCE);
-        for (w, v) in widths.iter_mut().zip([name, body_w(&c.orders), body_w(&c.wl), body_w(&c.volume), body_w(&c.avg), body_w(&c.profit), body_w(&c.pct)]) {
-            *w = w.max(v);
+    for (row, cols) in &rows {
+        widths[0] = widths[0].max(body_w(&row.name)).max(row.sub.chars().count() as f64 * SUB * ADVANCE);
+        for (w, (v, ..)) in widths.iter_mut().skip(1).zip(cols) {
+            *w = w.max(body_w(v));
         }
     }
     widths[0] += GAP;
@@ -161,7 +247,7 @@ fn svg(report: &Report) -> String {
     }
 
     let mut y = top + HEAD_H;
-    for (row, c) in &rows {
+    for (row, cols) in &rows {
         let total = matches!(row.kind, Kind::Total);
         if total {
             s += &format!(r#"<rect y="{y}" width="{width}" height="{ROW_H}" fill="{TOTAL_BG}"/>"#);
@@ -174,26 +260,9 @@ fn svg(report: &Report) -> String {
             let color = if matches!(row.kind, Kind::Emulator) { EMU } else { DIM };
             s += &text(xs[0], sub_y, SUB, color, "start", false, &row.sub);
         }
-        let money = if c.sign > 0.0 {
-            GREEN
-        } else if c.sign < 0.0 {
-            RED
-        } else {
-            NUM
-        };
         let num_y = mid + BODY * 0.35;
-        for (i, (v, color, bold)) in [
-            (&c.orders, NUM, total),
-            (&c.wl, DIM, false),
-            (&c.volume, NUM, total),
-            (&c.avg, NUM, false),
-            (&c.profit, money, true),
-            (&c.pct, money, false),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            s += &text(xs[i + 1], num_y, BODY, color, "end", bold, v);
+        for (i, (v, color, bold)) in cols.iter().enumerate() {
+            s += &text(xs[i + 1], num_y, BODY, color, "end", *bold, v);
         }
         y += ROW_H;
         s += &format!(r#"<rect y="{}" width="{width}" height="1" fill="{RULE}"/>"#, y - 1.0);
@@ -242,8 +311,12 @@ fn compact(v: f64) -> String {
 
 /// Two decimals with the sign, and no `-0.00`.
 fn signed(v: f64) -> String {
-    let v = if v.abs() < 0.005 { 0.0 } else { v };
-    format!("{v:+.2}")
+    format!("{:+.2}", rounded(v))
+}
+
+/// Zero for what shows as `0.00`.
+fn rounded(v: f64) -> f64 {
+    if v.abs() < 0.005 { 0.0 } else { v }
 }
 
 
@@ -255,12 +328,41 @@ mod tests {
     #[test]
     fn renders_png() {
         let t = |trades, wins, profit, volume| Some(Tally { trades, wins, profit, volume });
-        let row = |name: &str, sub: &str, kind, tally| Row { name: name.into(), sub: sub.into(), kind, tally, currency: "USDT".into() };
+        let row = |name: &str, sub: &str, kind, tally| Row {
+            name: name.into(),
+            sub: sub.into(),
+            kind,
+            tally,
+            currency: "USDT".into(),
+            cumulative: None,
+        };
+        let day = |name: &str, tally, cumulative| Row { cumulative: Some(cumulative), ..row(name, "", Kind::Core, tally) };
+        let by_date = Report {
+            title: "Month".into(),
+            label: "September 2026 · by date".into(),
+            updated: "updated 13:08:25 UTC".into(),
+            footer: "Closed trades by close time, UTC".into(),
+            by: By::Date,
+            rows: vec![
+                day("2026-09-24", t(7, 5, 85.82, 44_000.0), 5377.64),
+                day("2026-09-23", t(26, 15, -225.02, 112_000.0), 5291.81),
+                day("2026-09-19", t(18, 16, 1179.70, 86_000.0), 1637.09),
+                day("2026-09-18", t(5, 4, 457.39, 19_000.0), 457.39),
+                row("TOTAL", "", Kind::Total, t(56, 40, 1497.89, 261_000.0)),
+                row("TOTAL", "emulator", Kind::Total, t(2, 1, -376.01, 7_915.9)),
+            ],
+        };
+        let png = render(&by_date).unwrap();
+        assert_eq!(&png[..4], b"\x89PNG");
+        if let Ok(path) = std::env::var("PNL_PREVIEW") {
+            std::fs::write(path.replace(".png", "-by-date.png"), &png).unwrap();
+        }
         let report = Report {
             title: "Month".into(),
             label: "September 2026".into(),
             updated: "updated 13:08:25 UTC".into(),
             footer: "Closed trades by close time, UTC".into(),
+            by: By::Core,
             rows: vec![
                 row("Bin9", "ByBit Futures", Kind::Core, t(95, 67, 1087.85, 271_962.5)),
                 row("Bin9", "emulator · ByBit Futures", Kind::Emulator, t(2, 1, -376.01, 7_915.9)),

@@ -25,8 +25,8 @@ static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, PartialEq)]
 pub enum Link {
+    /// Connecting or running init.
     Connecting,
-    Initializing,
     Ready,
     Reconnecting,
     Failed(String),
@@ -120,6 +120,15 @@ impl Cores {
         result
     }
 
+    /// Start a session for every stored core — at startup, or once unlocked.
+    pub fn connect_all(&self) {
+        for entry in self.store.all() {
+            if let Err(e) = self.connect(&entry) {
+                log::error!("[core {}] {e}", entry.id);
+            }
+        }
+    }
+
     /// End the core's session and delete its replica.
     pub fn remove(&self, id: &str) {
         let session = self.sessions.lock().ok().and_then(|mut s| s.remove(id));
@@ -162,13 +171,18 @@ impl Cores {
             loop {
                 tick.tick().await;
                 let mut failed = Vec::new();
+                let mut open_rows = Vec::new();
                 if let Ok(sessions) = cores.sessions.lock() {
                     for (id, s) in sessions.iter() {
-                        s.replica.check_open_rows();
+                        open_rows.push(s.replica.open_rows());
                         if matches!(s.link, Link::Failed(_)) {
                             failed.push(id.clone());
                         }
                     }
+                }
+                // Outside the lock: every core's events wait on it.
+                for rows in open_rows {
+                    rows.send();
                 }
                 for id in failed {
                     if let Some(entry) = cores.store.get(&id) {
@@ -206,10 +220,8 @@ impl Cores {
                 MoonClientEvent::Lifecycle(event) => match event {
                     LifecycleEvent::Connecting => s.link = Link::Connecting,
                     LifecycleEvent::Connected { .. } => {
-                        s.link = if s.was_ready { Link::Ready } else { Link::Initializing };
-                        s.replica.set_offline(false);
+                        s.link = if s.was_ready { Link::Ready } else { Link::Connecting };
                     }
-                    LifecycleEvent::InitStepCompleted { .. } => s.link = Link::Initializing,
                     LifecycleEvent::Ready => {
                         s.link = Link::Ready;
                         s.was_ready = true;
@@ -227,7 +239,6 @@ impl Cores {
                     }
                     LifecycleEvent::Reconnecting => {
                         s.link = Link::Reconnecting;
-                        s.replica.set_offline(true);
                         log::warn!("[core {id}] link lost, reconnecting");
                     }
                     _ => {}

@@ -1,30 +1,42 @@
 # pnl-bot
 
-A Telegram bot that shows your realized PnL from MoonBot cores, for **today** and
-**this month**. It connects to each core over MoonProto and keeps a local copy of
-the core's `Orders` report, so answers come instantly and survive restarts.
+A Telegram bot that shows your profit and loss (PnL) from MoonBot cores.
+It shows the PnL for **today** and for **this month**. Only closed trades are counted.
 
-Each user runs their own copy on their own VPS, with their own bot from @BotFather.
-The bot answers only its owner.
+The bot connects to each core with MoonProto. It keeps a local copy of each core's `Orders` report.
+Because of this, answers are fast, and the data is still there after a restart.
 
-- Add and delete any number of cores from the chat with their MoonProto key.
-- Each core's trades are shown separately, then totalled. Emulator trades are listed apart from real ones.
+Each user runs their own copy of the bot on their own server (VPS), with their own bot from @BotFather.
+The bot answers only one person: its owner.
 
-## Using it
+- You can add and delete any number of cores in the chat. You need the core's MoonProto key.
+- The bot shows each core on its own line, then the total. Emulator trades are shown apart from real trades.
 
-`/start` opens the menu:
+## How to use the bot
 
-- **📊 Today** / **📅 Month** — PnL per core and in total, sent as a table image (or as text, see Settings):
-  orders, wins/losses, volume, average order, profit, profit % of volume.
+Send `/start` to open the menu.
+
+- **📊 Today** / **📅 Month** — PnL for each core and the total. The bot sends it as a table picture
+  (or as text, see Settings). The table has: orders, wins/losses, volume, average order, profit,
+  and profit as % of volume.
   **🔄 Refresh** updates the message.
-- **🖥 Cores** — the cores and their state (🟢 live, 🟡 connecting or syncing, 🟠 reconnecting, 🔴 offline).
-  The list shows 7 cores per page. With more, **◀ Prev** / **Next ▶** turn the pages.
-  - **➕ Add core** — send a name, then the key string MoonBot exports for MoonProto.
-    The bot deletes your message with the key right after reading it. If the key has no address
-    (older exports), the bot also asks for `host:port`.
-  - **📋 Add several** — send one message listing several cores, one per line: a name, then the key.
-    The bot deletes the message right after reading it, adds every valid line, and lists the lines it
-    skipped, by line number and reason:
+  **📅 Month** first asks you to choose a view:
+  - **🖥 By core** — the same table, one row for each core.
+  - **📆 By date** — all cores added together, one row for each day with trades. The newest day is first.
+    Each row has: orders, wins/losses, volume, profit, profit %, and the total profit of the month
+    up to that day. The last row is the total for the month.
+    Emulator trades are shown only in a separate total row.
+
+  The month report has a button to change to the other view.
+- **🖥 Cores** — your cores and their state:
+  🟢 live, 🟡 connecting or syncing, 🟠 reconnecting, 🔴 offline.
+  One page shows 7 cores. If you have more, use **◀ Prev** / **Next ▶**.
+  - **➕ Add core** — send a name, then the MoonProto key from MoonBot.
+    The bot deletes your message with the key right after it reads it.
+    Old keys have no address. For these, the bot also asks for `host:port`.
+  - **📋 Add several** — send one message with many cores, one core on each line: a name, then the key.
+    The bot deletes the message right after it reads it. It adds every correct line. Then it tells you
+    which lines it skipped (line number and reason). Example:
 
     ```
     Binance futures  KEY
@@ -33,59 +45,128 @@ The bot answers only its owner.
     Old core  KEY  203.0.113.5:4545
     ```
 
-    A line with only a key is named after MoonBot's own label for the key. A key without an address
-    needs `host:port` after it. Empty lines and lines starting with `#` are skipped.
-  - **🗑 name** — disconnects from that core and deletes the bot's local copy of its history.
-    Nothing changes on the core.
+    If a line has only a key, the bot uses the name that MoonBot saved in the key.
+    If a key has no address, write `host:port` after it.
+    The bot skips empty lines and lines that start with `#`.
+  - **🗑 name** — disconnects from this core and deletes the bot's local copy of its history.
+    Nothing changes on the core itself.
 - **⚙️ Settings**
-  - **Emulator trades:** shown or hidden in reports. Shown by default.
-  - **Reports come as:** a table image (default) or a text message. The text report is a monospace
-    table narrow enough for a phone — orders, wins/losses, profit and profit % — so it leaves out
-    volume, average order and the exchange.
+  - **Emulator trades:** show or hide them in reports. They are hidden by default.
+  - **Reports come as:** a text message (default) or a table picture. The text report is a small table
+    that fits on a phone screen. It has only orders, wins/losses, profit and profit %.
+    It does not show volume, average order or the exchange.
 
-  Both are saved with the bot's data and survive restarts.
+  The bot saves both settings. They stay after a restart.
 
 Commands: `/menu`, `/today`, `/month`, `/cores`, `/settings`, `/cancel`.
 
-Figures are closed trades, counted by close time. Open positions are not included.
-Reports use the core's clock. If your cores do not run on UTC, set `REPORT_UTC_OFFSET_MINUTES`.
+The numbers count only closed trades, by the time they closed. Open positions are not counted.
+Reports use the clock of the core. If your cores do not use UTC time, set `REPORT_UTC_OFFSET_MINUTES`.
 
 ## Install on a VPS
 
-1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token it gives you.
-2. From the [latest release](https://github.com/Asmodeios/moonproto-pnl-bot/releases/latest), download the
-   archive for the VPS's architecture (`uname -m`): `pnl-bot-linux-x86_64.tar.gz` or `pnl-bot-linux-aarch64.tar.gz`.
-   Copy it to the VPS (`scp pnl-bot-linux-x86_64.tar.gz user@VPS_IP:~`), or download it there with
-   `gh release download --repo Asmodeios/moonproto-pnl-bot --pattern 'pnl-bot-linux-x86_64.tar.gz'`.
-3. On the VPS (Ubuntu 22.04 or 24.04), unpack it and run the installer:
+1. In Telegram, open [@BotFather](https://t.me/BotFather) and send `/newbot`. Copy the token it gives you.
+2. On your computer, open the **Releases** page of this repository. Download the archive for your VPS.
+   To know which one you need, run `uname -m` on the VPS:
+
+   | `uname -m` | Archive |
+   |---|---|
+   | `x86_64` | `pnl-bot-linux-x86_64.tar.gz` |
+   | `aarch64` | `pnl-bot-linux-aarch64.tar.gz` |
+
+3. Copy the archive to the VPS. Run this in the folder where you downloaded it:
 
    ```sh
-   tar -xzf pnl-bot-linux-x86_64.tar.gz && cd pnl-bot
+   scp pnl-bot-linux-x86_64.tar.gz root@VPS_IP:~
+   ```
+
+   Change `root` to your login and `VPS_IP` to the address of your server.
+   On Windows, `scp` works in PowerShell. You can also use WinSCP.
+4. On the VPS (Ubuntu 22.04 or 24.04), unpack the archive and run the installer:
+
+   ```sh
+   cd ~
+   tar -xzf pnl-bot-linux-x86_64.tar.gz
+   cd pnl-bot
    sudo ./install.sh
    ```
 
-   The installer asks for the token and starts the service. The binary is prebuilt and static,
-   so nothing is compiled on the VPS.
-4. The installer prints a link like `https://t.me/your_bot?start=…`. Open it in Telegram and
-   press **Start**. Whoever opens it first becomes the owner, for good. Nobody else can use the bot after that.
-5. In the bot, go to **🖥 Cores → ➕ Add core** and add your cores.
+   The installer asks for the token. Then it asks for a passphrase (see [Passphrase](#passphrase)).
+   Press Enter if you do not want one. Then it starts the bot.
+   The program is already built, so the VPS does not need to compile or download anything.
+5. The installer shows a link like `https://t.me/your_bot?start=…`. Open it in Telegram and press **Start**.
+   The first person who opens the link becomes the owner. This cannot be changed later from the chat.
+   Nobody else can use the bot.
+   If you set a passphrase, the bot now asks you for it.
+6. In the bot, go to **🖥 Cores → ➕ Add core** and add your cores.
 
-To update, unpack a newer release the same way and run `sudo ./install.sh` again. It keeps the token, the owner and the cores.
+### Update
 
-If you know your numeric Telegram user id, you can set `OWNER_ID` in `/etc/pnl-bot.env` instead of
-using the link. A restart while the bot has no owner prints a new link:
-`journalctl -u pnl-bot | grep t.me`.
+Copy the new archive to the VPS in the same way. Then run on the VPS:
+
+```sh
+cd ~
+rm -rf pnl-bot
+tar -xzf pnl-bot-linux-x86_64.tar.gz
+cd pnl-bot
+sudo ./install.sh
+```
+
+The update keeps your token, owner and cores. They are saved in `/etc/pnl-bot.env` and `/var/lib/pnl-bot`,
+not in the folder you unpacked.
+
+If you know your Telegram user id (a number), you can put it in `OWNER_ID` in `/etc/pnl-bot.env`.
+Then you do not need the link. If the bot has no owner, it makes a new link after every restart.
+To see it, run `pnl --link`.
+
+## Control the bot: the `pnl` command
+
+The installer adds the `pnl` command. Use it on the VPS to control the bot.
+It asks for your password (with `sudo`) when it needs it.
+
+| Command | What it does |
+|---|---|
+| `pnl --start` | Start the bot. |
+| `pnl --stop` | Stop the bot. |
+| `pnl --restart` | Restart the bot. If you use a passphrase, the bot asks for it again in Telegram. |
+| `pnl --status` | Show if the bot is running, and the last lines of the log. |
+| `pnl --logs` | Show the log live. Press Ctrl+C to exit. |
+| `pnl --logs 100` | Show the last 100 lines of the log and exit. |
+| `pnl --link` | Show the link to become the owner (only while the bot has no owner). |
+| `pnl --passphrase` | Set, change or remove the [passphrase](#passphrase). |
+| `pnl --help` | Show this list. |
+
+The bot runs as a system service named `pnl-bot`. If it crashes or the server reboots,
+it starts again by itself. After `pnl --stop`, it stays stopped until `pnl --start` or the next reboot.
+
+## Passphrase
+
+A passphrase encrypts the core keys in `cores.json` (with Argon2id and XChaCha20-Poly1305).
+The bot never saves the passphrase.
+
+- After every start (also after a restart or an update), the bot is locked. It sends you a message in
+  Telegram. It does nothing until you send the passphrase.
+- The bot deletes your message with the passphrase right after it reads it.
+- After 3 wrong tries in a row, you must wait one minute.
+- To set, change or remove the passphrase, run `pnl --passphrase` on the VPS. It stops the bot,
+  encrypts the keys again, and starts the bot again. You can also add a passphrase later this way.
+- If you forget the passphrase, press **Forgot it?** under the lock message in the bot.
+  **Reset** deletes the saved cores. Then add them again. They are not encrypted until you run
+  `pnl --passphrase` again.
 
 ## Requirements
 
-- Ubuntu 22.04 or 24.04 LTS (any recent x86_64 or arm64 Linux works).
-- The bot uses a few tens of MB of RAM. Building from source needs about 2 GB.
-- The cores' MoonProto UDP port must be reachable from the server. The bot opens no ports of its own.
+- Ubuntu 22.04 or 24.04 LTS. Other new x86_64 or arm64 Linux systems also work.
+- The bot needs little RAM (tens of MB). To build it from source, you need about 2 GB.
+- The server must be able to reach the MoonProto UDP port of each core. The bot does not open any ports.
 - A bot token from [@BotFather](https://t.me/BotFather).
 
-## Manual build and install
+## Build and install by hand
 
-Run from a source checkout instead of a release archive, `install.sh` builds the bot itself. To do it by hand, build on the server or on any Linux machine with the same architecture:
+If you run `install.sh` from the source code (not from a release archive), it builds the bot for you.
+
+To do everything by hand, build on the server, or on another Linux computer with the same CPU type
+(`uname -m`):
 
 ```sh
 sudo apt update && sudo apt install -y build-essential pkg-config git curl
@@ -95,66 +176,80 @@ cd moonproto-pnl-bot
 cargo build --release
 ```
 
-SQLite and TLS are compiled in, so the binary needs no extra system libraries.
+SQLite and TLS are built into the program, so it does not need other system libraries.
 
 Then install the service:
 
 ```sh
 sudo install -D -m 0755 target/release/pnl-bot /opt/pnl-bot/pnl-bot
+sudo install -m 0755 deploy/pnl-bot-passphrase.sh /usr/local/sbin/pnl-bot-passphrase
+sudo install -m 0755 deploy/pnl.sh /usr/local/bin/pnl
 sudo install -m 0600 .env.example /etc/pnl-bot.env
 sudo nano /etc/pnl-bot.env            # set BOT_TOKEN
 sudo install -m 0644 deploy/pnl-bot.service /etc/systemd/system/pnl-bot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now pnl-bot
-journalctl -u pnl-bot -f              # logs
+pnl --logs                            # watch the log
 ```
 
-The unit runs the bot as a throwaway system user. Its data lives in `/var/lib/pnl-bot`: `cores.json`
-(the owner, and the cores with their keys) and `reports/*.sqlite3`. Only root and that user can read it.
-Leave `DATA_DIR` out of the env file, because a value there overrides the unit's.
+The service runs the bot as a temporary system user that systemd creates. The data is in `/var/lib/pnl-bot`:
+`cores.json` (the owner, and the cores with their keys) and `reports/*.sqlite3`.
+Only root and this user can read it.
+Do not put `DATA_DIR` in the env file, because it would replace the value from the service file.
 
-## Releasing
+## Release a new version
 
-Bump `version` in `Cargo.toml`, commit, then tag it and push the tag: `git tag v0.1.1 && git push origin v0.1.1`.
-The [Release workflow](.github/workflows/release.yml) builds static x86_64 and aarch64 binaries, packs each with
-the installer, and publishes them with `SHA256SUMS` as a GitHub Release. It fails if the tag doesn't match `Cargo.toml`.
-Run it from the Actions tab to build the archives without releasing.
+1. Change `version` in `Cargo.toml` and commit.
+2. Create a tag and push it: `git tag v0.1.1 && git push origin v0.1.1`.
 
-## Configuration
+The [Release workflow](.github/workflows/release.yml) builds static programs for x86_64 and aarch64.
+It packs each one with the installer and publishes them with `SHA256SUMS` as a GitHub Release.
+It fails if the tag is not the same as the version in `Cargo.toml`.
+You can also start it from the Actions tab. Then it builds the archives but does not publish a release.
 
-| Variable | Default | |
+## Settings (environment variables)
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `BOT_TOKEN` | — | Required. |
-| `OWNER_ID` | empty | Your Telegram user id, to skip the claim link. Once set, it replaces any owner stored earlier. |
-| `DATA_DIR` | `data` | Where `cores.json` and the report replicas are kept. |
-| `REPORT_UTC_OFFSET_MINUTES` | `0` | The cores' clock against UTC, e.g. `180` for UTC+3. |
-| `RUST_LOG` | `info,moonproto=warn` | Log filter. |
+| `BOT_TOKEN` | — | The bot token. Required. |
+| `OWNER_ID` | empty | Your Telegram user id, so you do not need the owner link. If set, it replaces the saved owner. |
+| `DATA_DIR` | `data` | The folder for `cores.json` and the local report copies. |
+| `REPORT_UTC_OFFSET_MINUTES` | `0` | The difference between the cores' clock and UTC, in minutes. For example `180` for UTC+3. |
+| `RUST_LOG` | `info,moonproto=warn` | How much to write to the log. |
 
-To run it by hand, put these in a `.env` next to where you start it, then run `cargo run --release`.
+To run the bot by hand, put these in a `.env` file in the folder where you start it.
+Then run `cargo run --release`.
 
-## Security notes
+## Security
 
-- A MoonProto key gives full control of its core. `cores.json` stores keys in plain text, protected only
-  by file permissions (0600 inside a 0700 directory). There is no OS keystore to seal them with on
-  a server. Keep the server and its backups private.
-- Keys are never written to the logs. Telegram API errors are logged without the request URL,
-  because that URL contains the bot token.
-- The bot works only in private chats, so a key is never pasted where others can read it.
-- Anyone can find a bot on Telegram, so ownership is set only by the one-time claim code
-  (12 random characters, printed only to the server log) or by `OWNER_ID`. Wrong codes are logged.
+- A MoonProto key gives full control of its core. Only the bot's user can read `cores.json`
+  (file 0600 in a 0700 folder). Without a [passphrase](#passphrase), the keys in it are plain text.
+- With a passphrase, a copy of the disk, a snapshot or a backup does not show the keys.
+  But a weak passphrase can be guessed, so use a long one.
+  The passphrase does not help against someone who has root on the running server,
+  because the unlocked keys are in the bot's memory.
+- You send the passphrase through Telegram. Bot chats are not end-to-end encrypted,
+  so Telegram's servers can see it. The bot deletes the message. It never writes the passphrase
+  to the log or to disk.
+- The bot never writes keys to the log. Telegram errors are logged without the request URL,
+  because the URL contains the bot token.
+- The bot works only in private chats, so you never send a key where other people can read it.
+- Anyone can find a bot in Telegram. So only the one-time owner code or `OWNER_ID` can set the owner.
+  The code has 12 random characters and is shown only in the server log. Wrong codes are logged.
 
 ## How it works
 
-| File | Role |
+| File | What it does |
 |---|---|
-| `src/main.rs` | Startup: config, store, token check (`getMe`), the claim code while the bot has no owner, one session per core, the bot loop, graceful shutdown on SIGTERM. |
-| `src/config.rs` | Environment settings. |
-| `src/store.rs` | `cores.json`: the owner and the cores. Atomic writes, owner-only permissions. |
-| `src/cores.rs` | MoonProto sessions: link state, the replica per session, and a reconnect every minute for cores whose connect failed. |
-| `src/replica.rs` | The report replica: schema migration, paged catch-up, live upserts and deletes, alive-map reconciliation, and a checkpoint stored with it. |
-| `src/pnl.rs` | Period bounds and the SQL tally over a replica. |
-| `src/table.rs` | The report drawn as a PNG table (SVG rasterized by resvg; JetBrains Mono, OFL, built in from `assets/fonts/`). |
-| `src/telegram.rs` | The Bot API calls (long polling; photo uploads for the report). |
-| `src/bot.rs` | Claiming, screens, buttons, and the add/delete flow. |
+| `src/main.rs` | Start: reads the settings, loads the data, checks the token (`getMe`), makes the owner code if there is no owner, connects to each core, runs the bot, and stops cleanly on SIGTERM. |
+| `src/config.rs` | Reads the environment variables. |
+| `src/store.rs` | `cores.json`: the owner and the cores. Safe (atomic) writes, owner-only file permissions, keys encrypted with the passphrase. |
+| `src/lock.rs` | The passphrase: makes the key with Argon2id, encrypts with XChaCha20-Poly1305. |
+| `src/cores.rs` | MoonProto connections: the state of each link, the local report copy for each core, and a new try every minute for cores that could not connect. |
+| `src/replica.rs` | The local report copy: database updates, first download page by page, live changes and deletes, checks against the core, and a saved checkpoint. |
+| `src/pnl.rs` | The time periods and the SQL that adds up the numbers. |
+| `src/table.rs` | Draws the report as a PNG table (SVG drawn by resvg; font JetBrains Mono, OFL license, from `assets/fonts/`). |
+| `src/telegram.rs` | The Telegram Bot API calls (long polling; sending the report pictures). |
+| `src/bot.rs` | Owner claim, unlock, screens, buttons, and adding and deleting cores. |
 
-The MoonProto crate is pinned to a commit in `Cargo.toml`.
+The MoonProto library is fixed to one commit in `Cargo.toml`.

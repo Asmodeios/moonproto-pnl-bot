@@ -19,7 +19,7 @@ impl Config {
             Some(v) => Some(v.parse::<i64>().map_err(|_| format!("OWNER_ID: `{v}` is not a Telegram user id"))?),
             None => None,
         };
-        let data_dir = PathBuf::from(var("DATA_DIR").unwrap_or_else(|| "data".to_string()));
+        let data_dir = data_dir();
         let report_offset_min = match var("REPORT_UTC_OFFSET_MINUTES") {
             Some(v) => v
                 .parse::<i64>()
@@ -30,6 +30,11 @@ impl Config {
         };
         Ok(Self { bot_token, owner_id, data_dir, report_offset_min })
     }
+}
+
+/// `DATA_DIR`, `data` by default.
+pub fn data_dir() -> PathBuf {
+    PathBuf::from(var("DATA_DIR").unwrap_or_else(|| "data".to_string()))
 }
 
 fn var(name: &str) -> Option<String> {

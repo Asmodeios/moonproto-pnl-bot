@@ -8,6 +8,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exec sudo -- "$0" "$@"
 fi
 cd "$(dirname "$0")"
+trap 'echo; echo "Manage the bot with: pnl --help (start, stop, logs, ...)"' EXIT
 
 ENV_FILE=/etc/pnl-bot.env
 UNIT=/etc/systemd/system/pnl-bot.service
@@ -29,6 +30,8 @@ else
 fi
 
 install -D -m 0755 "$BIN" /opt/pnl-bot/pnl-bot
+install -m 0755 deploy/pnl-bot-passphrase.sh /usr/local/sbin/pnl-bot-passphrase
+install -m 0755 deploy/pnl.sh /usr/local/bin/pnl
 
 if ! grep -qs '^BOT_TOKEN=.' "$ENV_FILE"; then
   echo
@@ -46,41 +49,61 @@ if ! grep -qs '^BOT_TOKEN=.' "$ENV_FILE"; then
     printf 'BOT_TOKEN=%s\nREPORT_UTC_OFFSET_MINUTES=0\n' "$TOKEN" > "$ENV_FILE"
   )
   unset TOKEN
+
+  echo
+  echo "Choose a passphrase to encrypt the core keys you add. It is never stored: after every restart"
+  echo "the bot asks you for it in Telegram. If you forget it, you add your cores again."
+  systemctl stop pnl-bot 2>/dev/null || true
+  /usr/local/sbin/pnl-bot-passphrase
 fi
 chmod 600 "$ENV_FILE"
 
 install -m 0644 deploy/pnl-bot.service "$UNIT"
 systemctl daemon-reload
-START="$(date '+%Y-%m-%d %H:%M:%S')"
 systemctl enable pnl-bot >/dev/null 2>&1
+# The bot writes where it stands to this file (src/status.rs); cleared so a
+# stale one from an earlier run isn't read.
+STATUS_FILE=/var/lib/private/pnl-bot/status
+rm -f "$STATUS_FILE"
 systemctl restart pnl-bot
+field() { sed -n "s/^$1=//p" "$STATUS_FILE" 2>/dev/null | head -n 1 || true; }
 
 echo "==> Starting"
 for _ in $(seq 1 30); do
-  LOG="$(journalctl -u pnl-bot --since "$START" -o cat --no-pager 2>/dev/null || true)"
-  if grep -q 'bot token was not accepted' <<<"$LOG"; then
-    echo
-    echo "Telegram rejected the token. Fix BOT_TOKEN in $ENV_FILE, then run: sudo systemctl restart pnl-bot"
-    exit 1
-  fi
-  LINK="$(grep -o 'https://t\.me/[^ ]*' <<<"$LOG" | tail -n 1 || true)"
-  if [ -n "$LINK" ]; then
-    echo
-    echo "Almost done. Open this link in Telegram and press Start — it makes you the bot's owner:"
-    echo
-    echo "    $LINK"
-    echo
-    echo "The link works once and only until the service restarts (a restart prints a new one:"
-    echo "journalctl -u pnl-bot | grep t.me)."
-    exit 0
-  fi
-  if grep -q 'started with' <<<"$LOG"; then
-    echo
-    echo "pnl-bot is running and already has its owner. Open your bot in Telegram and send /menu."
-    exit 0
-  fi
+  case "$(field state)" in
+    error)
+      echo
+      echo "pnl-bot stopped: $(field error)"
+      echo "Fix it in $ENV_FILE (BOT_TOKEN), then run: pnl --restart"
+      exit 1
+      ;;
+    unclaimed)
+      echo
+      echo "Almost done. Open this link in Telegram and press Start — it makes you the bot's owner:"
+      echo
+      echo "    $(field link)"
+      echo
+      echo "The link works once and only until the service restarts (a restart makes a new one:"
+      echo "pnl --link)."
+      if [ "$(field locked)" = yes ]; then
+        echo "Then send the bot your passphrase to unlock it."
+      fi
+      exit 0
+      ;;
+    locked)
+      echo
+      echo "pnl-bot is running and locked. Open your bot in Telegram and send it your passphrase."
+      exit 0
+      ;;
+    running)
+      echo
+      echo "pnl-bot is running and already has its owner. Open your bot in Telegram and send /menu."
+      echo "The core keys are stored unencrypted; to encrypt them, run: pnl --passphrase"
+      exit 0
+      ;;
+  esac
   sleep 1
 done
 echo
-echo "The service did not report in. Check: journalctl -u pnl-bot -n 50"
+echo "The service did not report in. Check: pnl --logs 50"
 exit 1

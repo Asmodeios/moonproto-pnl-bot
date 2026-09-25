@@ -5,13 +5,13 @@
 //! bounds are taken in that clock too (`REPORT_UTC_OFFSET_MINUTES`). A win is a
 //! close at or above zero; profit % is Σ profit / Σ spent.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, Datelike, NaiveDate};
+use chrono::{DateTime, Datelike, Months, NaiveDate};
 use rusqlite::Connection;
 
-use crate::replica::{quote_ident, COL_CLOSE_DATE, COL_CLOSE_DATE_MS, COL_DELETED, REPORT_TABLE};
+use crate::replica::{quote_ident, report_columns, COL_CLOSE_DATE, COL_CLOSE_DATE_MS, COL_DELETED, REPORT_TABLE};
 
 const COL_PROFIT: &str = "ProfitBTC";
 const COL_SPENT: &str = "SpentBTC";
@@ -39,12 +39,7 @@ pub fn bounds(period: Period, now_utc_ms: i64, offset_min: i64) -> Bounds {
         Period::Today => (now, now.succ_opt().unwrap_or(now), now.format("%d.%m.%Y").to_string()),
         Period::Month => {
             let first = now.with_day(1).unwrap_or(now);
-            let next = if now.month() == 12 {
-                NaiveDate::from_ymd_opt(now.year() + 1, 1, 1)
-            } else {
-                NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1)
-            }
-            .unwrap_or(now);
+            let next = first.checked_add_months(Months::new(1)).unwrap_or(now);
             (first, next, now.format("%B %Y").to_string())
         }
     };
@@ -61,13 +56,12 @@ pub struct Tally {
 }
 
 impl Tally {
-    fn add(&mut self, profit: f64, spent: f64) {
-        self.trades += 1;
-        if profit >= 0.0 {
-            self.wins += 1;
-        }
-        self.profit += profit;
-        self.volume += spent;
+    /// Fold another tally into this one.
+    pub fn merge(&mut self, other: &Tally) {
+        self.trades += other.trades;
+        self.wins += other.wins;
+        self.profit += other.profit;
+        self.volume += other.volume;
     }
 
     pub fn losses(&self) -> u32 {
@@ -79,24 +73,64 @@ impl Tally {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct CoreTally {
     pub real: Tally,
     pub emulator: Tally,
 }
 
+impl CoreTally {
+    fn merge(&mut self, emulator: bool, t: &Tally) {
+        if emulator {
+            self.emulator.merge(t);
+        } else {
+            self.real.merge(t);
+        }
+    }
+}
+
+const DAY_MS: i64 = 86_400_000;
+
 /// `None` while the replica holds no report table yet (never synced).
 pub fn tally(path: &Path, from: i64, to: i64) -> Result<Option<CoreTally>, String> {
+    Ok(sums(path, from, to, false)?.map(|groups| {
+        let mut out = CoreTally::default();
+        for (_, emulator, t) in groups {
+            out.merge(emulator, &t);
+        }
+        out
+    }))
+}
+
+/// [`tally`] split by the report-clock day each trade closed on.
+pub fn daily(path: &Path, from: i64, to: i64) -> Result<Option<BTreeMap<NaiveDate, CoreTally>>, String> {
+    Ok(sums(path, from, to, true)?.map(|groups| {
+        let mut out: BTreeMap<NaiveDate, CoreTally> = BTreeMap::new();
+        for (day, emulator, t) in groups {
+            let day = DateTime::from_timestamp_millis(day * DAY_MS).unwrap_or_default().date_naive();
+            out.entry(day).or_default().merge(emulator, &t);
+        }
+        out
+    }))
+}
+
+/// A group of closed trades: its day (days since the epoch; 0 when not
+/// grouped by day), whether they are emulator trades, and their sums.
+type Group = (i64, bool, Tally);
+
+/// The closed trades in `[from, to)` summed per emulator flag and, `by_day`,
+/// per day.
+fn sums(path: &Path, from: i64, to: i64, by_day: bool) -> Result<Option<Vec<Group>>, String> {
     if !path.exists() {
         return Ok(None);
     }
     let conn = Connection::open(path).map_err(|e| format!("could not open the replica: {e}"))?;
     let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
     let table = quote_ident(REPORT_TABLE);
-    let cols: HashSet<String> = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .and_then(|mut stmt| stmt.query_map([], |r| r.get::<_, String>(1))?.collect())
-        .map_err(|e| format!("could not read the replica: {e}"))?;
+    let cols: HashSet<String> = report_columns(&conn)
+        .map_err(|e| format!("could not read the replica: {e}"))?
+        .into_iter()
+        .collect();
     if cols.is_empty() {
         return Ok(None);
     }
@@ -111,34 +145,36 @@ pub fn tally(path: &Path, from: i64, to: i64) -> Result<Option<CoreTally>, Strin
         return Err("the core's report has no close date".to_string());
     }
     // The ms column where the core has it; rows older than it are NULL there.
-    let close = if cols.contains(COL_CLOSE_DATE_MS) {
-        format!("COALESCE({}, {} * 1000)", quote_ident(COL_CLOSE_DATE_MS), quote_ident(COL_CLOSE_DATE))
-    } else {
-        format!("{} * 1000", quote_ident(COL_CLOSE_DATE))
-    };
+    let close = col(COL_CLOSE_DATE_MS, &format!("{} * 1000", quote_ident(COL_CLOSE_DATE)));
+    let profit = col(COL_PROFIT, "0");
+    let day = if by_day { format!("CAST({close} AS INTEGER) / {DAY_MS}") } else { "0".to_string() };
+    // The seconds column narrows the scan through its index; a day's margin
+    // either side, and the exact bounds on the ms value.
     let sql = format!(
-        "SELECT {profit}, {spent}, {emu} FROM {table} WHERE {deleted} = 0 AND {close} >= ?1 AND {close} < ?2",
-        profit = col(COL_PROFIT, "0"),
+        "SELECT {day}, {emu} != 0, COUNT(*), SUM({profit} >= 0), TOTAL({profit}), TOTAL({spent}) FROM {table}
+         WHERE {deleted} = 0 AND {close_s} >= ?3 AND {close_s} < ?4 AND {close} >= ?1 AND {close} < ?2
+         GROUP BY 1, 2",
+        close_s = quote_ident(COL_CLOSE_DATE),
         spent = col(COL_SPENT, "0"),
         emu = col(COL_EMULATOR, "0"),
         deleted = col(COL_DELETED, "0"),
     );
+    let margin_s = DAY_MS / 1000;
+    let params = rusqlite::params![from, to, from / 1000 - margin_s, to / 1000 + margin_s];
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("could not read the replica: {e}"))?;
-    let mut out = CoreTally::default();
-    let rows = stmt
-        .query_map(rusqlite::params![from, to], |r| {
-            Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)? != 0))
+    let groups = stmt
+        .query_map(params, |r| {
+            let tally = Tally {
+                trades: r.get::<_, i64>(2)? as u32,
+                wins: r.get::<_, i64>(3)? as u32,
+                profit: r.get(4)?,
+                volume: r.get(5)?,
+            };
+            Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, tally))
         })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(|e| format!("could not read the replica: {e}"))?;
-    for row in rows {
-        let (profit, spent, emulator) = row.map_err(|e| format!("could not read the replica: {e}"))?;
-        if emulator {
-            out.emulator.add(profit, spent);
-        } else {
-            out.real.add(profit, spent);
-        }
-    }
-    Ok(Some(out))
+    Ok(Some(groups))
 }
 
 #[cfg(test)]
@@ -178,7 +214,8 @@ mod tests {
              INSERT INTO Orders VALUES (3, 1, 2000, 2000000, 50.0, 100.0, 0);
              INSERT INTO Orders VALUES (4, 0, 0, 0, 0.0, 100.0, 0);
              INSERT INTO Orders VALUES (5, 0, 1500, 1500000, 1.0, 10.0, 1);
-             INSERT INTO Orders VALUES (6, 0, 9000, 9000000, 7.0, 10.0, 0);",
+             INSERT INTO Orders VALUES (6, 0, 9000, 9000000, 7.0, 10.0, 0);
+             INSERT INTO Orders VALUES (7, 0, 86405, 86405000, 2.0, 20.0, 0);",
         )
         .unwrap();
         drop(conn);
@@ -186,6 +223,17 @@ mod tests {
         assert_eq!((t.real.trades, t.real.wins), (2, 1));
         assert!((t.real.profit - 3.0).abs() < 1e-9);
         assert_eq!(t.emulator.trades, 1);
+        // All three closes in range fall on 1970-01-01.
+        let d = daily(&path, 1_000_000, 3_000_000).unwrap().unwrap();
+        assert_eq!(d.len(), 1);
+        let day = d[&NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()];
+        assert_eq!((day.real.trades, day.emulator.trades), (2, 1));
+        // Two days: rows 1, 2, 5 and 6 on the first, row 7 on the second.
+        let d = daily(&path, 1, 2 * DAY).unwrap().unwrap();
+        assert_eq!(d.len(), 2);
+        let second = d[&NaiveDate::from_ymd_opt(1970, 1, 2).unwrap()];
+        assert_eq!((second.real.trades, second.real.wins), (1, 1));
+        assert!((second.real.volume - 20.0).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

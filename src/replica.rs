@@ -35,7 +35,6 @@ pub enum Phase {
     Page,
     Complete,
     Live,
-    Offline,
     Error,
 }
 
@@ -81,23 +80,24 @@ impl Replica {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
-    pub fn set_offline(&self, offline: bool) {
-        if let Ok(mut s) = self.status.lock() {
-            match (offline, s.phase) {
-                (true, Phase::Error) => {}
-                (true, _) => s.phase = Phase::Offline,
-                (false, Phase::Offline) => s.phase = Phase::Live,
-                _ => {}
-            }
-        }
-    }
-
-    /// Keep the open rows registered with the core, so a close or change
+    /// The open rows, to register again with the core so a close or change
     /// outside catch-up range — or while offline — still reaches the replica.
-    pub fn check_open_rows(&self) {
-        let ids: Vec<i64> = self.open_ids.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
-        if !ids.is_empty() {
-            let _ = self.reports.check_open_rows(&ids);
+    /// Taken under the sessions lock, sent outside it.
+    pub fn open_rows(&self) -> OpenRows {
+        let ids = self.open_ids.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
+        OpenRows { reports: self.reports.clone(), ids }
+    }
+}
+
+pub struct OpenRows {
+    reports: MoonReports,
+    ids: Vec<i64>,
+}
+
+impl OpenRows {
+    pub fn send(self) {
+        if !self.ids.is_empty() {
+            let _ = self.reports.check_open_rows(&self.ids);
         }
     }
 }
@@ -116,6 +116,13 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 
 pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// The report table's column names; empty before it exists.
+pub fn report_columns(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(REPORT_TABLE)))?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    rows.collect()
 }
 
 fn history_depth_label(depth: ReportHistoryDepth) -> String {
@@ -197,14 +204,39 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn read_checkpoint(conn: &Connection) -> Option<(ReportSyncCheckpoint, String)> {
+fn read_checkpoint(conn: &Connection) -> Option<(ReportSyncCheckpoint, ReportHistoryDepth)> {
     conn.query_row("SELECT epoch, next_from_rec_id, history_depth FROM _sync_meta WHERE id=1", [], |row| {
         let epoch: i64 = row.get(0)?;
         let next: i64 = row.get(1)?;
         let depth: String = row.get(2)?;
-        Ok((ReportSyncCheckpoint { epoch: epoch as i32, next_from_rec_id: next }, depth))
+        Ok((ReportSyncCheckpoint { epoch: epoch as i32, next_from_rec_id: next }, history_depth_from_label(&depth)))
     })
     .ok()
+}
+
+/// The report table as the schema lays it out — none until the first
+/// `Schema` event, and again after the database is recreated.
+struct Table {
+    fields: Vec<ReportSchemaField>,
+    rec_id_col: String,
+    upsert_sql: String,
+    delete_sql: String,
+    close_idx: Option<u16>,
+    close_ms_idx: Option<u16>,
+}
+
+impl Table {
+    /// A row with no close date yet is open — kept for `check_open_rows`.
+    fn track_open(&self, open: &mut HashSet<i64>, row: &ReportRow) {
+        let ms = self.close_ms_idx.and_then(|i| row.value(i)).and_then(as_i64);
+        let secs = self.close_idx.and_then(|i| row.value(i)).and_then(as_i64);
+        let is_open = ms.or_else(|| secs.map(|s| s.saturating_mul(1000))).unwrap_or(0) == 0;
+        if is_open {
+            open.insert(row.rec_id);
+        } else {
+            open.remove(&row.rec_id);
+        }
+    }
 }
 
 struct Writer {
@@ -213,12 +245,8 @@ struct Writer {
     reports: MoonReports,
     open_ids: Arc<Mutex<HashSet<i64>>>,
     status: Arc<Mutex<SyncStatus>>,
-    fields_ordered: Vec<ReportSchemaField>,
-    rec_id_col: String,
-    upsert_sql: String,
-    close_idx: Option<u16>,
-    close_ms_idx: Option<u16>,
-    history_depth: String,
+    table: Option<Table>,
+    history_depth: ReportHistoryDepth,
     pending_sync_complete: Option<ReportSyncComplete>,
     /// The schema is revalidated once per hard session, not per `sync()`: a
     /// mid-session `database_recreated` gets pages with no further `Schema`
@@ -250,12 +278,8 @@ fn run_writer(
         reports,
         open_ids,
         status,
-        fields_ordered: Vec::new(),
-        rec_id_col: String::new(),
-        upsert_sql: String::new(),
-        close_idx: None,
-        close_ms_idx: None,
-        history_depth: history_depth_label(ReportHistoryDepth::ServerDefault),
+        table: None,
+        history_depth: ReportHistoryDepth::ServerDefault,
         pending_sync_complete: None,
         cached_schema: None,
     };
@@ -286,18 +310,13 @@ impl Writer {
     }
 
     fn handle_event(&mut self, event: ReportEvent) {
-        self.set(|s| {
-            if s.phase == Phase::Offline {
-                s.phase = Phase::Live;
-            }
-        });
         match event {
             ReportEvent::Schema(schema) => {
                 self.migrate(&schema);
                 self.cached_schema = Some(schema);
             }
             ReportEvent::SyncStarted { request, .. } => {
-                self.history_depth = history_depth_label(request.history_depth);
+                self.history_depth = request.history_depth;
                 self.set(|s| {
                     s.phase = Phase::Page;
                     s.rows_synced = 0;
@@ -331,14 +350,7 @@ impl Writer {
     /// Create the table from the schema, or add any field it is missing —
     /// the schema is append-only, so this is safe on every `Schema` event.
     fn migrate(&mut self, schema: &ReportSchema) {
-        let existing_cols: Vec<String> = self
-            .conn
-            .prepare(&format!("PRAGMA table_info({})", quote_ident(REPORT_TABLE)))
-            .and_then(|mut stmt| {
-                let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .unwrap_or_default();
+        let existing_cols = report_columns(&self.conn).unwrap_or_default();
         if existing_cols.is_empty() {
             let sql = schema.sqlite_create_table_sql(REPORT_TABLE);
             if let Err(e) = self.conn.execute(&sql, []) {
@@ -357,15 +369,32 @@ impl Writer {
                 }
             }
         }
+        let close_idx = schema.field_by_name(COL_CLOSE_DATE).map(|f| f.index);
+        if close_idx.is_some() {
+            // Reports narrow on it (`pnl.rs`) before the exact ms bounds.
+            let sql = format!(
+                "CREATE INDEX IF NOT EXISTS {} ON {}({})",
+                quote_ident(&format!("{REPORT_TABLE}_{COL_CLOSE_DATE}")),
+                quote_ident(REPORT_TABLE),
+                quote_ident(COL_CLOSE_DATE)
+            );
+            if let Err(e) = self.conn.execute(&sql, []) {
+                log::warn!("[replica] {}: close date index: {e}", self.core_id);
+            }
+        }
         let columns: Vec<String> = schema.fields().iter().map(|f| f.name.clone()).collect();
-        self.fields_ordered = schema.fields().to_vec();
-        self.rec_id_col = schema
+        let rec_id_col = schema
             .field(schema.rec_id_field_index())
             .map(|f| f.name.clone())
             .unwrap_or_else(|| COL_REC_ID.to_string());
-        self.upsert_sql = build_upsert_sql(&columns, &self.rec_id_col);
-        self.close_idx = schema.field_by_name(COL_CLOSE_DATE).map(|f| f.index);
-        self.close_ms_idx = schema.field_by_name(COL_CLOSE_DATE_MS).map(|f| f.index);
+        self.table = Some(Table {
+            fields: schema.fields().to_vec(),
+            upsert_sql: build_upsert_sql(&columns, &rec_id_col),
+            delete_sql: format!("DELETE FROM {} WHERE {}=?1", quote_ident(REPORT_TABLE), quote_ident(&rec_id_col)),
+            rec_id_col,
+            close_idx,
+            close_ms_idx: schema.field_by_name(COL_CLOSE_DATE_MS).map(|f| f.index),
+        });
     }
 
     fn apply_page(&mut self, page: &ReportSyncPage) {
@@ -376,16 +405,16 @@ impl Writer {
             }
             return;
         }
-        if self.upsert_sql.is_empty() {
+        let Some(table) = &self.table else {
             self.fail("report page arrived before schema".to_string());
             return;
-        }
+        };
         let result = (|| -> rusqlite::Result<()> {
             let tx = self.conn.transaction()?;
             {
-                let mut stmt = tx.prepare_cached(&self.upsert_sql)?;
+                let mut stmt = tx.prepare_cached(&table.upsert_sql)?;
                 for row in page.rows.iter() {
-                    stmt.execute(rusqlite::params_from_iter(bind_values(&self.fields_ordered, row)))?;
+                    stmt.execute(rusqlite::params_from_iter(bind_values(&table.fields, row)))?;
                 }
             }
             tx.commit()
@@ -394,7 +423,7 @@ impl Writer {
             Ok(()) => {
                 if let Ok(mut open) = self.open_ids.lock() {
                     for row in page.rows.iter() {
-                        self.track_open(&mut open, row);
+                        table.track_open(&mut open, row);
                     }
                 }
                 let synced = page.row_count() as u32;
@@ -412,25 +441,32 @@ impl Writer {
     }
 
     fn upsert_row(&mut self, row: &ReportRow) {
-        if self.upsert_sql.is_empty() {
+        let Some(table) = &self.table else {
             return;
-        }
-        let values = bind_values(&self.fields_ordered, row);
-        if let Err(e) = self.conn.execute(&self.upsert_sql, rusqlite::params_from_iter(values)) {
+        };
+        let values = bind_values(&table.fields, row);
+        let upserted = self
+            .conn
+            .prepare_cached(&table.upsert_sql)
+            .and_then(|mut stmt| stmt.execute(rusqlite::params_from_iter(values)));
+        if let Err(e) = upserted {
             self.fail(format!("upsert row {}: {e}", row.rec_id));
             return;
         }
         if let Ok(mut open) = self.open_ids.lock() {
-            self.track_open(&mut open, row);
+            table.track_open(&mut open, row);
         }
     }
 
     fn delete_row(&mut self, rec_id: i64) {
-        if self.rec_id_col.is_empty() {
+        let Some(table) = &self.table else {
             return;
-        }
-        let sql = format!("DELETE FROM {} WHERE {}=?1", quote_ident(REPORT_TABLE), quote_ident(&self.rec_id_col));
-        if let Err(e) = self.conn.execute(&sql, rusqlite::params![rec_id]) {
+        };
+        let deleted = self
+            .conn
+            .prepare_cached(&table.delete_sql)
+            .and_then(|mut stmt| stmt.execute(rusqlite::params![rec_id]));
+        if let Err(e) = deleted {
             self.fail(format!("delete row {rec_id}: {e}"));
             return;
         }
@@ -440,24 +476,25 @@ impl Writer {
     }
 
     fn apply_rows_deleted(&mut self, change: &ReportRowsDeleted) {
-        if self.rec_id_col.is_empty() {
+        let Some(t) = &self.table else {
             return;
-        }
+        };
         let table = quote_ident(REPORT_TABLE);
-        let rec = quote_ident(&self.rec_id_col);
+        let rec = quote_ident(&t.rec_id_col);
+        let del = quote_ident(COL_DELETED);
         let flag = change.deleted as i64;
         let result = (|| -> rusqlite::Result<()> {
             if !change.ranges.is_empty() {
                 let mut by_range = self
                     .conn
-                    .prepare_cached(&format!("UPDATE {table} SET \"{COL_DELETED}\"=?1 WHERE {rec} BETWEEN ?2 AND ?3"))?;
+                    .prepare_cached(&format!("UPDATE {table} SET {del}=?1 WHERE {rec} BETWEEN ?2 AND ?3"))?;
                 for range in change.ranges.iter() {
                     by_range.execute(rusqlite::params![flag, range.from_rec_id, range.to_rec_id])?;
                 }
             }
             if !change.singles.is_empty() {
                 let placeholders = vec!["?"; change.singles.len()].join(",");
-                let sql = format!("UPDATE {table} SET \"{COL_DELETED}\"=?1 WHERE {rec} IN ({placeholders})");
+                let sql = format!("UPDATE {table} SET {del}=?1 WHERE {rec} IN ({placeholders})");
                 let mut params: Vec<SqlValue> = vec![SqlValue::Integer(flag)];
                 params.extend(change.singles.iter().map(|id| SqlValue::Integer(*id)));
                 self.conn.execute(&sql, rusqlite::params_from_iter(params))?;
@@ -475,9 +512,8 @@ impl Writer {
     fn apply_alive_map(&mut self, map: ReportAliveMapComplete) {
         match map.outcome {
             ReportAliveMapOutcome::DatabaseRecreated => {
-                let depth = history_depth_from_label(&self.history_depth);
                 self.recreate_database();
-                if let Err(e) = self.reports.sync(ReportSyncRequest::fresh(depth)) {
+                if let Err(e) = self.reports.sync(ReportSyncRequest::fresh(self.history_depth)) {
                     self.fail(format!("resync after database_recreated: {e}"));
                 }
             }
@@ -485,20 +521,20 @@ impl Writer {
                 let Some(done) = self.pending_sync_complete.take() else {
                     return;
                 };
-                if self.rec_id_col.is_empty() {
+                let Some(t) = &self.table else {
                     return;
-                }
+                };
                 let table = quote_ident(REPORT_TABLE);
-                let rec = quote_ident(&self.rec_id_col);
+                let rec = quote_ident(&t.rec_id_col);
+                let del = quote_ident(COL_DELETED);
                 let checkpoint = done.checkpoint();
-                let history_depth = self.history_depth.clone();
+                let history_depth = history_depth_label(self.history_depth);
                 let synced_at = chrono::Utc::now().timestamp_millis();
                 let result = (|| -> rusqlite::Result<()> {
                     let tx = self.conn.transaction()?;
                     {
                         let flagged: Vec<(i64, bool)> = {
-                            let mut stmt =
-                                tx.prepare(&format!("SELECT {rec}, \"{COL_DELETED}\" FROM {table} WHERE {rec} <= ?1"))?;
+                            let mut stmt = tx.prepare(&format!("SELECT {rec}, {del} FROM {table} WHERE {rec} <= ?1"))?;
                             let found = stmt
                                 .query_map(rusqlite::params![map.covered_up_to], |r| {
                                     Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0) != 0))
@@ -507,7 +543,7 @@ impl Writer {
                                 .collect();
                             found
                         };
-                        let mut update = tx.prepare(&format!("UPDATE {table} SET \"{COL_DELETED}\"=?1 WHERE {rec}=?2"))?;
+                        let mut update = tx.prepare(&format!("UPDATE {table} SET {del}=?1 WHERE {rec}=?2"))?;
                         for (id, deleted) in flagged {
                             if let Some(alive) = map.is_alive(id) {
                                 if alive == deleted {
@@ -539,29 +575,13 @@ impl Writer {
     fn recreate_database(&mut self) {
         let _ = self.conn.execute(&format!("DROP TABLE IF EXISTS {}", quote_ident(REPORT_TABLE)), []);
         let _ = self.conn.execute("DELETE FROM _sync_meta WHERE id=1", []);
-        self.fields_ordered.clear();
-        self.rec_id_col.clear();
-        self.upsert_sql.clear();
-        self.close_idx = None;
-        self.close_ms_idx = None;
+        self.table = None;
         if let Ok(mut open) = self.open_ids.lock() {
             open.clear();
         }
         self.set(|s| *s = SyncStatus::default());
         if let Some(schema) = self.cached_schema.clone() {
             self.migrate(&schema);
-        }
-    }
-
-    /// A row with no close date yet is open — kept for `check_open_rows`.
-    fn track_open(&self, open: &mut HashSet<i64>, row: &ReportRow) {
-        let ms = self.close_ms_idx.and_then(|i| row.value(i)).and_then(as_i64);
-        let secs = self.close_idx.and_then(|i| row.value(i)).and_then(as_i64);
-        let is_open = ms.or_else(|| secs.map(|s| s.saturating_mul(1000))).unwrap_or(0) == 0;
-        if is_open {
-            open.insert(row.rec_id);
-        } else {
-            open.remove(&row.rec_id);
         }
     }
 }
