@@ -23,7 +23,7 @@ jobs:
       TARGET: ${{ matrix.arch }}-unknown-linux-musl
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/')
@@ -59,7 +59,7 @@ jobs:
           file out/pnl-bot/pnl-bot
           tar -C out -czf "pnl-bot-linux-${{ matrix.arch }}.tar.gz" pnl-bot
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pnl-bot-linux-${{ matrix.arch }}
           path: pnl-bot-linux-${{ matrix.arch }}.tar.gz
@@ -70,7 +70,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
