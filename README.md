@@ -74,7 +74,7 @@ Reports use the clock of the core. If your cores do not use UTC time, set `REPOR
    | `x86_64` | `pnl-bot-linux-x86_64.tar.gz` |
    | `aarch64` | `pnl-bot-linux-aarch64.tar.gz` |
 
-3. Copy the archive to the VPS. Run this in the folder where you downloaded it:
+3. Copy the archive to the VPS, with `scp` or copied manually. For `scp`, run this in the folder where you downloaded it:
 
    ```sh
    scp pnl-bot-linux-x86_64.tar.gz root@VPS_IP:~
@@ -91,8 +91,12 @@ Reports use the clock of the core. If your cores do not use UTC time, set `REPOR
    sudo ./install.sh
    ```
 
-   The installer asks for the token. Then it asks for a passphrase (see [Passphrase](#passphrase)).
-   Press Enter if you do not want one. Then it starts the bot.
+   The installer then:
+
+   1. Asks for the bot token. Paste the token from @BotFather.
+   2. Asks for a passphrase (see [Passphrase](#passphrase)). Press Enter if you do not want one.
+   3. Starts the bot.
+
    The program is already built, so the VPS does not need to compile or download anything.
 5. The installer shows a link like `https://t.me/your_bot?start=…`. Open it in Telegram and press **Start**.
    The first person who opens the link becomes the owner. This cannot be changed later from the chat.
