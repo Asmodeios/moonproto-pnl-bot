@@ -1,0 +1,17 @@
+Third-party licenses for pnl-bot
+================================
+
+The pnl-bot binary contains the code of the crates listed below, grouped by
+license. The JetBrains Mono font and the MoonProto NOTICE follow at the end.
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

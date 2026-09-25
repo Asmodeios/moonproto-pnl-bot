@@ -257,3 +257,9 @@ Then run `cargo run --release`.
 | `src/bot.rs` | Owner claim, unlock, screens, buttons, and adding and deleting cores. |
 
 The MoonProto library is fixed to one commit in `Cargo.toml`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). MoonProto is Apache-2.0. The JetBrains Mono font is under the SIL Open Font License, see [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
+Each release archive has a `THIRD_PARTY_LICENSES` file with the licenses of all the libraries and the font in the program.
+It is made by [cargo-about](https://github.com/EmbarkStudios/cargo-about) from `about.toml` and `about.hbs`.

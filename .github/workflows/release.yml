@@ -49,11 +49,32 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target "$TARGET"
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      # The licenses of the crates in the binary (about.toml, about.hbs), then the
+      # built-in font's license and MoonProto's NOTICE, which Apache-2.0 asks to keep.
+      - name: Third-party licenses
+        run: |
+          mkdir -p out/pnl-bot
+          out=out/pnl-bot/THIRD_PARTY_LICENSES
+          cargo about generate --locked --fail -o "$out" about.hbs
+          moonproto="$(dirname "$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "moonproto") | .manifest_path')")"
+          test -f "$moonproto/NOTICE"
+          {
+            printf '\n%s\nJetBrains Mono font (assets/fonts), SIL Open Font License 1.1\n\n' "$(printf '%.0s-' {1..80})"
+            cat assets/fonts/OFL.txt
+            printf '\n%s\nMoonProto NOTICE\n\n' "$(printf '%.0s-' {1..80})"
+            cat "$moonproto/NOTICE"
+          } >> "$out"
+
       # The layout install.sh expects: the binary next to it and no Cargo.toml.
       - name: Package
         run: |
           mkdir -p out/pnl-bot/deploy
-          cp "target/$TARGET/release/pnl-bot" install.sh .env.example README.md out/pnl-bot/
+          cp "target/$TARGET/release/pnl-bot" install.sh .env.example README.md LICENSE out/pnl-bot/
           cp deploy/pnl-bot.service deploy/pnl-bot-passphrase.sh deploy/pnl.sh out/pnl-bot/deploy/
           chmod 755 out/pnl-bot/pnl-bot out/pnl-bot/install.sh
           file out/pnl-bot/pnl-bot
