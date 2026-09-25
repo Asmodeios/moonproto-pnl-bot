@@ -1,0 +1,24 @@
+[Unit]
+Description=MoonBot PnL Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/opt/pnl-bot/pnl-bot
+EnvironmentFile=/etc/pnl-bot.env
+Environment=DATA_DIR=/var/lib/pnl-bot
+# A throwaway system user; /var/lib/pnl-bot is created and owned for it.
+DynamicUser=yes
+StateDirectory=pnl-bot
+StateDirectoryMode=0700
+UMask=0077
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target
