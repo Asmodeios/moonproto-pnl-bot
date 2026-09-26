@@ -46,15 +46,28 @@ pub enum Kind {
     Total,
 }
 
-/// What a report's rows are: one per core, or one per day with a running total.
+/// What a report's rows are: one per core, one per coin, or one per day with a
+/// running total.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum By {
     Core,
+    Coin,
     Date,
 }
 
+impl By {
+    /// What one row stands for — the name column's heading.
+    pub fn name(self) -> &'static str {
+        match self {
+            By::Core => "Core",
+            By::Coin => "Coin",
+            By::Date => "Day",
+        }
+    }
+}
+
 pub struct Row {
-    /// The core's name, or the day.
+    /// The core's name, the coin, or the day.
     pub name: String,
     /// The dim line under the name.
     pub sub: String,
@@ -159,7 +172,7 @@ type Column<'a> = (&'a str, &'static str, bool);
 fn columns(by: By, total: bool, c: &Cells) -> Vec<Column<'_>> {
     let profit = money(c.sign);
     match by {
-        By::Core => vec![
+        By::Core | By::Coin => vec![
             (&c.orders, NUM, total),
             (&c.wl, DIM, false),
             (&c.volume, NUM, total),
@@ -179,10 +192,12 @@ fn columns(by: By, total: bool, c: &Cells) -> Vec<Column<'_>> {
 }
 
 fn svg(report: &Report) -> String {
-    let heads: &[&str] = match report.by {
-        By::Core => &["CORE", "ORDERS", "W/L", "VOLUME", "AVG ORDER", "PROFIT", "%"],
-        By::Date => &["DAY", "ORDERS", "W/L", "VOLUME", "PROFIT", "%", "CUMULATIVE"],
+    let name = report.by.name().to_uppercase();
+    let rest: &[&str] = match report.by {
+        By::Core | By::Coin => &["ORDERS", "W/L", "VOLUME", "AVG ORDER", "PROFIT", "%"],
+        By::Date => &["ORDERS", "W/L", "VOLUME", "PROFIT", "%", "CUMULATIVE"],
     };
+    let heads: Vec<&str> = std::iter::once(name.as_str()).chain(rest.iter().copied()).collect();
     let cells: Vec<Cells> = report.rows.iter().map(cells).collect();
     let rows: Vec<(&Row, Vec<Column>)> = report
         .rows

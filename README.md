@@ -20,14 +20,18 @@ Send `/start` to open the menu.
   (or as text, see Settings). The table has: orders, wins/losses, volume, average order, profit,
   and profit as % of volume.
   **🔄 Refresh** updates the message.
+  **📊 Today** has a button to change between **🖥 By core** and **🪙 By coin**.
   **📅 Month** first asks you to choose a view:
   - **🖥 By core** — the same table, one row for each core.
+  - **🪙 By coin** — all cores added together, one row for each coin. The coins with the biggest profit
+    or loss are first. Emulator trades of a coin are shown in a separate row under it. If there are more
+    than 20 coins, the table shows 20 of them, and one row ("N others") with the sum of the rest.
   - **📆 By date** — all cores added together, one row for each day with trades. The newest day is first.
     Each row has: orders, wins/losses, volume, profit, profit %, and the total profit of the month
     up to that day. The last row is the total for the month.
     Emulator trades are shown only in a separate total row.
 
-  The month report has a button to change to the other view.
+  The month report has buttons to change to the other views.
 - **🖥 Cores** — your cores and their state:
   🟢 live, 🟡 connecting or syncing, 🟠 reconnecting, 🔴 offline.
   One page shows 7 cores. If you have more, use **◀ Prev** / **Next ▶**.
@@ -39,15 +43,16 @@ Send `/start` to open the menu.
     which lines it skipped (line number and reason). Example:
 
     ```
-    Binance futures  KEY
-    Gate: KEY
+    Binance 1  KEY
+    Binance 2: KEY
     KEY
-    Old core  KEY  203.0.113.5:4545
+    Binance 4  KEY  203.0.113.5:4545
     ```
 
     If a line has only a key, the bot uses the name that MoonBot saved in the key.
     If a key has no address, write `host:port` after it.
     The bot skips empty lines and lines that start with `#`.
+  - **✏️ name** — gives the core a new name. Send the new name as a message.
   - **🗑 name** — disconnects from this core and deletes the bot's local copy of its history.
     Nothing changes on the core itself.
 - **⚙️ Settings**

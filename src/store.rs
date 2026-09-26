@@ -187,6 +187,17 @@ impl Store {
         self.edit(|d| d.cores.retain(|c| c.id != id))
     }
 
+    /// The core's old name, `None` if it's gone.
+    pub fn rename(&self, id: &str, name: &str) -> Result<Option<String>, String> {
+        let mut old = None;
+        self.edit(|d| {
+            if let Some(e) = d.cores.iter_mut().find(|e| e.id == id) {
+                old = Some(std::mem::replace(&mut e.name, name.to_string()));
+            }
+        })?;
+        Ok(old)
+    }
+
     /// Saved only when it differs — the core reports it on every connect.
     pub fn set_currency(&self, id: &str, currency: &str) -> Result<(), String> {
         let unchanged = self

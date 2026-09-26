@@ -26,10 +26,22 @@ const MAX_NAME_CHARS: usize = 40;
 /// How often a live Cores screen is re-read, and for how long at most.
 const LIVE_EVERY: Duration = Duration::from_secs(3);
 const LIVE_FOR: Duration = Duration::from_secs(10 * 60);
-/// Cores per page of the Cores screen — its table rows and 🗑 buttons.
+/// Cores per page of the Cores screen — its table rows and ✏️/🗑 buttons.
 const CORES_PER_PAGE: usize = 7;
+/// Coins a By coin report lists one by one, the biggest profits and losses.
+const MAX_COIN_ROWS: usize = 20;
 /// Room for the report's notes under Telegram's 1024-character caption limit.
 const CAPTION_BUDGET: usize = 900;
+/// The note for a core deleted while its screen was open.
+const GONE: &str = "That core is already gone.";
+/// Each report layout a period comes in, with its button data.
+const REPORTS: [(Period, By, &str); 5] = [
+    (Period::Today, By::Core, "r:t"),
+    (Period::Today, By::Coin, "r:tk"),
+    (Period::Month, By::Core, "r:mc"),
+    (Period::Month, By::Coin, "r:mk"),
+    (Period::Month, By::Date, "r:md"),
+];
 /// Wrong passphrases in a row before a pause.
 const UNLOCK_TRIES: u32 = 3;
 const UNLOCK_PAUSE: Duration = Duration::from_secs(60);
@@ -72,6 +84,8 @@ enum Pending {
     Endpoint { name: String, key: String },
     /// A list of cores, one per line.
     Batch,
+    /// A new name for the core `id`.
+    Rename { id: String },
 }
 
 /// The Cores screen being kept current.
@@ -139,7 +153,7 @@ impl Bot {
             ("month", "PnL this month"),
             ("cores", "Manage cores"),
             ("settings", "Settings"),
-            ("cancel", "Cancel adding a core"),
+            ("cancel", "Cancel adding or renaming a core"),
         ];
         if let Err(e) = self.tg.set_commands(&commands).await {
             log::warn!("{e}");
@@ -464,12 +478,9 @@ impl Bot {
         }
         match pending {
             Pending::Name => {
-                let name = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if !valid_name(&name) {
-                    self.set_pending(Some(Pending::Name));
-                    let ask = format!("Send a name of 1–{MAX_NAME_CHARS} characters.");
-                    return self.prompt(chat, &ask, cancel).await;
-                }
+                let Some(name) = self.take_name(chat, text, Pending::Name).await? else {
+                    return Ok(());
+                };
                 let ask = format!(
                     "Now send the MoonProto key for <b>{}</b> — the key string MoonBot exports.\n\n\
                      I delete your message as soon as I've read it.",
@@ -509,7 +520,34 @@ impl Bot {
                 self.delete_secret(chat, message_id, "the keys").await?;
                 self.add_batch(chat, text).await
             }
+            Pending::Rename { id } => {
+                let Some(name) = self.take_name(chat, text, Pending::Rename { id: id.clone() }).await? else {
+                    return Ok(());
+                };
+                self.end_flow(None).await;
+                let note = match self.store.rename(&id, &name) {
+                    Ok(Some(old)) => {
+                        log::info!("renamed core {id}");
+                        format!("✏️ <b>{}</b> renamed to <b>{}</b>.", escape(&old), escape(&name))
+                    }
+                    Ok(None) => GONE.to_string(),
+                    Err(e) => format!("❌ {}", escape(&e)),
+                };
+                self.show_cores(chat, Some(note)).await
+            }
         }
+    }
+
+    /// The name sent, cleaned; `None` once asked again with `retry` pending.
+    async fn take_name(&self, chat: i64, text: &str, retry: Pending) -> Result<Option<String>, String> {
+        let name = cores::clean_name(text);
+        if valid_name(&name) {
+            return Ok(Some(name));
+        }
+        self.set_pending(Some(retry));
+        let ask = format!("Send a name of 1–{MAX_NAME_CHARS} characters.");
+        self.prompt(chat, &ask, Some(cancel_kb())).await?;
+        Ok(None)
     }
 
     async fn add_core(&self, chat: i64, name: String, key: String, host: String, port: u16) -> Result<(), String> {
@@ -595,9 +633,9 @@ impl Bot {
         // start a new one.
         self.end_flow(Some(msg.message_id)).await;
         let screen: Screen = match data {
-            "r:t" => self.report_screen(Period::Today, By::Core).await,
-            "r:mc" => self.report_screen(Period::Month, By::Core).await,
-            "r:md" => self.report_screen(Period::Month, By::Date).await,
+            _ if let Some(&(period, by, _)) = REPORTS.iter().find(|r| r.2 == data) => {
+                self.report_screen(period, by).await
+            }
             "r:m" => self.month_screen().into(),
             "m" => self.main_screen().into(),
             _ if let Some(page) = data.strip_prefix("c:p:") => {
@@ -608,12 +646,12 @@ impl Bot {
             "x" => self.cores_screen(Some("Cancelled.".to_string())),
             "c:add" | "c:batch" => {
                 let (pending, text) = if data == "c:add" {
-                    (Pending::Name, "Send a name for the new core, e.g. <i>Binance futures</i>.")
+                    (Pending::Name, "Send a name for the new core, e.g. <i>Binance 1</i>.")
                 } else {
                     (
                         Pending::Batch,
                         "Send your cores in one message, one per line — a name, then the core's MoonProto key:\n\n\
-                         <code>Binance futures  KEY\nGate: KEY\nKEY</code>\n\n\
+                         <pre>Binance 1  KEY\nBinance 2: KEY\nKEY\nBinance 4  KEY  203.0.113.5:4545</pre>\n\n\
                          A line with just a key takes MoonBot's own label for the key as its name. For a key \
                          that carries no address, add <code>host:port</code> after it. Empty lines and lines \
                          starting with # are skipped.\n\nI delete your message as soon as I've read it.",
@@ -646,7 +684,16 @@ impl Bot {
                     let kb = json!([[button("✅ Delete", &format!("c:rm:{}", core.id)), button("✖ Cancel", "c")]]);
                     (text, kb).into()
                 }
-                None => self.cores_screen(Some("That core is already gone.".to_string())),
+                None => self.cores_screen(Some(GONE.to_string())),
+            },
+            _ if let Some(id) = data.strip_prefix("c:ren:") => match self.store.get(id) {
+                Some(core) => {
+                    self.set_pending(Some(Pending::Rename { id: core.id.clone() }));
+                    self.follow(msg.chat.id, msg.message_id);
+                    let text = format!("Send a new name for <b>{}</b>.", escape(&core.name));
+                    (text, cancel_kb()).into()
+                }
+                None => self.cores_screen(Some(GONE.to_string())),
             },
             _ if let Some(id) = data.strip_prefix("c:rm:") => match self.store.get(id) {
                 Some(core) => {
@@ -655,7 +702,7 @@ impl Bot {
                     log::info!("deleted core {}", core.id);
                     self.cores_screen(Some(format!("🗑 <b>{}</b> deleted.", escape(&core.name))))
                 }
-                None => self.cores_screen(Some("That core is already gone.".to_string())),
+                None => self.cores_screen(Some(GONE.to_string())),
             },
             _ => self.main_screen().into(),
         };
@@ -703,25 +750,23 @@ impl Bot {
             format!("Cores: {} · online: {online}", cores.len())
         };
         let kb = json!([
-            [button("📊 Today", "r:t"), button("📅 Month", "r:m")],
+            [button("📊 Today", report_code(Period::Today, By::Core)), button("📅 Month", "r:m")],
             [button("🖥 Cores", "c"), button("⚙️ Settings", "s")],
         ]);
         (format!("<b>MoonBot PnL</b>\n\n{body}"), kb)
     }
 
-    /// The month report's two layouts to pick from.
+    /// The month report's layouts to pick from.
     fn month_screen(&self) -> (String, Value) {
         let now = chrono::Utc::now().timestamp_millis();
         let label = pnl::bounds(Period::Month, now, self.offset_min).label;
         let text = format!(
             "<b>📅 Month</b> — {label}\n\n🖥 <b>By core</b>: each core's PnL for the month.\n\
+             🪙 <b>By coin</b>: each coin's PnL for the month, all cores together.\n\
              📆 <b>By date</b>: all cores' PnL day by day, with the running total."
         );
-        let kb = json!([
-            [button("🖥 By core", "r:mc"), button("📆 By date", "r:md")],
-            [button("⬅ Menu", "m")],
-        ]);
-        (text, kb)
+        let views: Vec<Value> = views(Period::Month).map(|by| view_button(Period::Month, by)).collect();
+        (text, json!([views, [button("⬅ Menu", "m")]]))
     }
 
     fn settings_screen(&self) -> (String, Value) {
@@ -763,19 +808,25 @@ impl Bot {
             let view = self.cores.view(&core.id);
             let state = core_state(view.as_ref());
             let exchange = view.as_ref().and_then(|v| v.exchange.clone()).unwrap_or_else(|| "—".to_string());
-            table.push((core.name.clone(), exchange, state.icon));
+            let ip = cores::host(core).map_or_else(|| "—".to_string(), |h| mask_host(&h));
+            table.push((core.name.clone(), exchange, ip, state.icon));
             if let Some(s) = state.note {
                 notes.push_str(&format!("{} <b>{}</b>: <i>{s}</i>\n", state.icon, escape(&core.name)));
             }
-            rows.push(json!([button(&format!("🗑 {}", core.name), &format!("c:del:{}", core.id))]));
+            rows.push(json!([
+                button(&format!("✏️ {}", core.name), &format!("c:ren:{}", core.id)),
+                button(&format!("🗑 {}", core.name), &format!("c:del:{}", core.id)),
+            ]));
         }
         if !table.is_empty() {
             // The dot goes last: emoji width in Telegram's monospace varies by client.
-            let name_w = table.iter().map(|(n, ..)| n.chars().count()).max().unwrap_or(0).max(4);
-            let exch_w = table.iter().map(|(_, e, _)| e.chars().count()).max().unwrap_or(0).max(8);
-            let mut pre = format!("{:name_w$}  {:exch_w$}\n", "Core", "Exchange");
-            for (name, exchange, icon) in &table {
-                pre.push_str(&format!("{name:name_w$}  {exchange:exch_w$}  {icon}\n"));
+            let (core_h, exch_h, ip_h) = ("Core", "Exchange", "IP");
+            let name_w = width(core_h, table.iter().map(|(n, ..)| n));
+            let exch_w = width(exch_h, table.iter().map(|(_, e, ..)| e));
+            let ip_w = width(ip_h, table.iter().map(|(_, _, ip, _)| ip));
+            let mut pre = format!("{core_h:name_w$}  {exch_h:exch_w$}  {ip_h:ip_w$}\n");
+            for (name, exchange, ip, icon) in &table {
+                pre.push_str(&format!("{name:name_w$}  {exchange:exch_w$}  {ip:ip_w$}  {icon}\n"));
             }
             text.push_str(&format!("<pre>{}</pre>", escape(pre.trim_end())));
             if !notes.is_empty() {
@@ -797,9 +848,9 @@ impl Bot {
         Screen { text, kb: Value::Array(rows), png: None, follow: Follow::Cores(note) }
     }
 
-    /// The report for `period` laid out `by` core or date: a table image
-    /// with the notes as its caption, or text alone while there's nothing
-    /// to draw. Today's is always by core.
+    /// The report for `period` laid out `by` core, coin or date: a table
+    /// image with the notes as its caption, or text alone while there's
+    /// nothing to draw. Today's is never by date.
     async fn report_screen(&self, period: Period, by: By) -> Screen {
         let now = chrono::Utc::now().timestamp_millis();
         let bounds = pnl::bounds(period, now, self.offset_min);
@@ -807,32 +858,19 @@ impl Bot {
         let paths: Vec<_> = cores.iter().map(|c| self.cores.replica_path(&c.id)).collect();
         let (from, to) = (bounds.from, bounds.to);
 
-        let (title, label, kb, by) = match (period, by) {
-            (Period::Today, _) => (
-                "Today",
-                bounds.label.clone(),
-                json!([[button("🔄 Refresh", "r:t"), button("📅 Month", "r:m")], [button("⬅ Menu", "m")]]),
-                By::Core,
-            ),
-            (Period::Month, By::Core) => (
-                "Month",
-                bounds.label.clone(),
-                json!([
-                    [button("🔄 Refresh", "r:mc"), button("📆 By date", "r:md")],
-                    [button("📊 Today", "r:t"), button("⬅ Menu", "m")],
-                ]),
-                By::Core,
-            ),
-            (Period::Month, By::Date) => (
-                "Month",
-                format!("{} · by date", bounds.label),
-                json!([
-                    [button("🔄 Refresh", "r:md"), button("🖥 By core", "r:mc")],
-                    [button("📊 Today", "r:t"), button("⬅ Menu", "m")],
-                ]),
-                By::Date,
-            ),
+        let by = if views(period).any(|v| v == by) { by } else { By::Core };
+        let label = match by {
+            By::Core => bounds.label.clone(),
+            By::Coin => format!("{} · by coin", bounds.label),
+            By::Date => format!("{} · by date", bounds.label),
         };
+        let (title, other) = match period {
+            Period::Today => ("Today", button("📅 Month", "r:m")),
+            Period::Month => ("Month", button("📊 Today", report_code(Period::Today, By::Core))),
+        };
+        let mut first = vec![button("🔄 Refresh", report_code(period, by))];
+        first.extend(views(period).filter(|&v| v != by).map(|v| view_button(period, v)));
+        let kb = json!([first, [other, button("⬅ Menu", "m")]]);
         if cores.is_empty() {
             let text = format!("<b>{title}</b> — {label}\n\nNo cores yet — add one under 🖥 Cores.");
             return Screen { text, kb, png: None, follow: Follow::No };
@@ -845,6 +883,10 @@ impl Bot {
             By::Core => {
                 let tallies = per_replica(paths, move |p| pnl::tally(p, from, to)).await;
                 self.core_rows(&cores, tallies, show_emu, &mut notes)
+            }
+            By::Coin => {
+                let coins = per_replica(paths, move |p| pnl::by_coin(p, from, to)).await;
+                coin_rows(&cores, coins, show_emu, &mut notes)
             }
             By::Date => {
                 let dailies = per_replica(paths, move |p| pnl::daily(p, from, to)).await;
@@ -1021,6 +1063,85 @@ fn date_rows(
     rows
 }
 
+/// A row per coin — two with emulator trades — summed over the cores, the
+/// biggest profit or loss first, then the totals. Past `MAX_COIN_ROWS`
+/// coins, the rest are summed into one row so the image stays a size
+/// Telegram takes.
+fn coin_rows(
+    cores: &[CoreEntry],
+    coins: Vec<Result<Option<BTreeMap<String, CoreTally>>, String>>,
+    show_emu: bool,
+    notes: &mut Vec<String>,
+) -> Vec<table::Row> {
+    // Keyed by currency first: a sum across currencies means nothing.
+    let mut sums: BTreeMap<(String, String), CoreTally> = BTreeMap::new();
+    for (core, by_coin) in cores.iter().zip(coins) {
+        let by_coin = match by_coin {
+            Ok(Some(by_coin)) => by_coin,
+            Ok(None) | Err(_) => {
+                notes.push(missing_note(core, by_coin.err()));
+                continue;
+            }
+        };
+        for (coin, mut t) in by_coin {
+            if !show_emu {
+                t.emulator = Tally::default();
+            }
+            sums.entry((core.currency.clone(), coin)).or_default().add(&t);
+        }
+    }
+    let mut coins: Vec<((String, String), CoreTally)> =
+        sums.into_iter().filter(|(_, t)| t.real.trades > 0 || t.emulator.trades > 0).collect();
+    coins.sort_by(|a, b| b.1.real.profit.abs().total_cmp(&a.1.real.profit.abs()));
+    let mut real_total: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut emu_total: BTreeMap<String, Tally> = BTreeMap::new();
+    for ((cur, _), t) in &coins {
+        if t.real.trades > 0 {
+            real_total.entry(cur.clone()).or_default().merge(&t.real);
+        }
+        if t.emulator.trades > 0 {
+            emu_total.entry(cur.clone()).or_default().merge(&t.emulator);
+        }
+    }
+    let rows_of = |name: String, currency: &String, t: &CoreTally| {
+        let row = |sub: &str, kind, tally| table::Row {
+            name: name.clone(),
+            sub: sub.to_string(),
+            kind,
+            tally: Some(tally),
+            currency: currency.clone(),
+            cumulative: None,
+        };
+        let mut rows = Vec::new();
+        if t.real.trades > 0 || t.emulator.trades == 0 {
+            rows.push(row("", table::Kind::Core, t.real));
+        }
+        if t.emulator.trades > 0 {
+            rows.push(row("emulator", table::Kind::Emulator, t.emulator));
+        }
+        rows
+    };
+    let mut rows = Vec::new();
+    let (shown, rest) = coins.split_at(coins.len().min(MAX_COIN_ROWS));
+    for ((cur, coin), t) in shown {
+        rows.extend(rows_of(coin.clone(), cur, t));
+    }
+    let mut others: BTreeMap<String, (usize, CoreTally)> = BTreeMap::new();
+    for ((cur, _), t) in rest {
+        let (n, sum) = others.entry(cur.clone()).or_default();
+        *n += 1;
+        sum.add(t);
+    }
+    for (cur, (n, t)) in &others {
+        rows.extend(rows_of(format!("{n} others"), cur, t));
+    }
+    if real_total.is_empty() {
+        real_total.insert(cores.first().map(|c| c.currency.clone()).unwrap_or_default(), Tally::default());
+    }
+    rows.extend(total_rows(&real_total, &emu_total));
+    rows
+}
+
 /// A TOTAL row per currency, then an emulator one per currency.
 fn total_rows(real: &BTreeMap<String, Tally>, emulator: &BTreeMap<String, Tally>) -> Vec<table::Row> {
     let total = |sub: &str, currency: &String, t: &Tally| table::Row {
@@ -1079,8 +1200,9 @@ fn core_state(view: Option<&CoreView>) -> CoreState {
 /// a day shows without its year — the title has it.
 fn report_text(report: &table::Report) -> String {
     let by_date = report.by == By::Date;
-    let head: &[&str] = if by_date { &["Day", "Ord", "W/L", "Profit", "%", "Cum"] } else { &["Core", "Ord", "W/L", "Profit", "%"] };
-    let mut lines: Vec<Vec<String>> = vec![head.iter().map(|h| h.to_string()).collect()];
+    let rest: &[&str] = if by_date { &["Ord", "W/L", "Profit", "%", "Cum"] } else { &["Ord", "W/L", "Profit", "%"] };
+    let head: Vec<String> = std::iter::once(report.by.name()).chain(rest.iter().copied()).map(String::from).collect();
+    let mut lines: Vec<Vec<String>> = vec![head];
     let mut body = 0;
     for row in &report.rows {
         let name = match row.kind {
@@ -1100,7 +1222,7 @@ fn report_text(report: &table::Report) -> String {
             body = lines.len();
         }
     }
-    let mut w = vec![0usize; head.len()];
+    let mut w = vec![0usize; lines[0].len()];
     for line in &lines {
         for (w, cell) in w.iter_mut().zip(line) {
             *w = (*w).max(cell.chars().count());
@@ -1130,6 +1252,50 @@ fn report_text(report: &table::Report) -> String {
         escape(&report.footer),
         escape(&report.updated)
     )
+}
+
+/// A monospace column's width: its widest cell, or its heading.
+fn width<'a>(head: &str, cells: impl Iterator<Item = &'a String>) -> usize {
+    cells.map(|c| c.chars().count()).fold(head.chars().count(), usize::max)
+}
+
+/// The layouts `period`'s report comes in.
+fn views(period: Period) -> impl Iterator<Item = By> {
+    REPORTS.into_iter().filter(move |r| r.0 == period).map(|r| r.1)
+}
+
+/// The button data that opens `period`'s report laid out `by`.
+fn report_code(period: Period, by: By) -> &'static str {
+    REPORTS.iter().find(|r| r.0 == period && r.1 == by).map_or("r:t", |r| r.2)
+}
+
+/// A button that opens `period`'s report laid out `by`.
+fn view_button(period: Period, by: By) -> Value {
+    let label = match by {
+        By::Core => "🖥 By core",
+        By::Coin => "🪙 By coin",
+        By::Date => "📆 By date",
+    };
+    button(label, report_code(period, by))
+}
+
+/// A host with its second half hidden: `203.0.*.*`, `2001:db8:*`,
+/// `core.exa…` — enough to tell cores apart without giving the address away.
+fn mask_host(host: &str) -> String {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            format!("{a}.{b}.*.*")
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let [a, b, ..] = ip.segments();
+            format!("{a:x}:{b:x}:*")
+        }
+        Err(_) => {
+            let keep = host.chars().count().div_ceil(2);
+            format!("{}…", host.chars().take(keep).collect::<String>())
+        }
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -1209,6 +1375,42 @@ mod tests {
         assert_eq!(err, "no MoonBot key at the end of the line");
         // The error names the problem, never the line: it may hold a key.
         assert!(!err.contains("notakey"));
+    }
+
+    #[test]
+    fn hosts_are_half_masked() {
+        assert_eq!(mask_host("203.0.113.5"), "203.0.*.*");
+        assert_eq!(mask_host("2001:db8::1"), "2001:db8:*");
+        assert_eq!(mask_host("core.example.com"), "core.exa…");
+    }
+
+    #[test]
+    fn coin_rows_sum_cores_and_cap() {
+        let core = |id: &str| CoreEntry {
+            id: id.into(),
+            name: id.into(),
+            key: String::new(),
+            sealed_key: String::new(),
+            host: String::new(),
+            port: 0,
+            currency: "USDT".into(),
+        };
+        let real = |profit| CoreTally { real: Tally { trades: 1, wins: 1, profit, volume: 10.0 }, ..Default::default() };
+        // Profits -15 to +14; C1 loses 100 more on core b.
+        let a: BTreeMap<String, CoreTally> = (0..30).map(|i| (format!("C{i}"), real(f64::from(i - 15)))).collect();
+        let b: BTreeMap<String, CoreTally> = [("C1".to_string(), real(-100.0))].into();
+        let cores = [core("a"), core("b"), core("c")];
+        let mut notes = Vec::new();
+        let rows = coin_rows(&cores, vec![Ok(Some(a)), Ok(Some(b)), Ok(None)], true, &mut notes);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        // The biggest profits and losses first, the other 10 in one row, the total.
+        assert_eq!(names.len(), MAX_COIN_ROWS + 2);
+        assert_eq!(&names[..3], ["C1", "C0", "C29"]);
+        assert_eq!(names[MAX_COIN_ROWS], "10 others");
+        assert_eq!(rows[0].tally.unwrap().trades, 2);
+        assert_eq!(rows[MAX_COIN_ROWS].tally.unwrap().trades, 10);
+        assert_eq!(names.last(), Some(&"TOTAL"));
+        assert_eq!(notes.len(), 1);
     }
 
     #[test]

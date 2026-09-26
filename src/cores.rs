@@ -273,13 +273,7 @@ fn stop(session: Option<Session>) {
 fn client_config(entry: &CoreEntry) -> Result<ClientConfig, String> {
     let info = parse_key_info(entry.key.trim()).ok_or("the stored key is not a MoonBot key export")?;
     let suggested = info.network.as_ref();
-    let host = match entry.host.trim() {
-        "" => suggested
-            .and_then(|n| n.address)
-            .map(|ip| ip.to_string())
-            .ok_or("this key carries no address")?,
-        host => host.to_string(),
-    };
+    let host = host(entry).ok_or("this key carries no address")?;
     let port = match entry.port {
         0 => suggested.map(|n| n.port).filter(|p| *p != 0).ok_or("this key carries no port")?,
         port => port,
@@ -291,9 +285,22 @@ fn client_config(entry: &CoreEntry) -> Result<ClientConfig, String> {
         .with_refresh(RefreshConfig { update_markets_every: None, check_tags_every: None }))
 }
 
+/// The host the entry overrides, else the one the key export carries.
+pub fn host(entry: &CoreEntry) -> Option<String> {
+    match entry.host.trim() {
+        "" => parse_key_info(entry.key.trim())?.network?.address.map(|ip| ip.to_string()),
+        host => Some(host.to_string()),
+    }
+}
+
 /// MoonBot's own label for a key — a name for a core listed without one.
 pub fn key_label(key: &str) -> Option<String> {
-    parse_key_info(key.trim()).map(|info| info.display_name.split_whitespace().collect::<Vec<_>>().join(" "))
+    parse_key_info(key.trim()).map(|info| clean_name(&info.display_name))
+}
+
+/// A name with its runs of whitespace made single spaces.
+pub fn clean_name(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Whether a key names its own endpoint — asked before a core is added.
