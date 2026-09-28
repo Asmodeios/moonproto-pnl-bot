@@ -24,7 +24,8 @@ REPO=Asmodeios/moonproto-pnl-bot
 # SHA256SUMS and runs its install.sh, which keeps the token, owner and cores
 # and restarts the service.
 update() {
-  local arch tag current tmp archive base
+  # tmp stays global: the EXIT trap reads it after this function has returned.
+  local arch tag current archive base
   case "$(uname -m)" in
     x86_64|amd64) arch=x86_64 ;;
     aarch64|arm64) arch=aarch64 ;;
