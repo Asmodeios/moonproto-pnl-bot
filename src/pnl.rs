@@ -3,7 +3,7 @@
 //! A trade counts in the period its close date falls in; open trades are left
 //! out. Report dates are the core's own wall clock encoded as epoch ms, so the
 //! bounds are taken in that clock too (`REPORT_UTC_OFFSET_MINUTES`). A win is a
-//! close at or above zero; profit % is Σ profit / Σ spent.
+//! close at or above zero.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -12,15 +12,15 @@ use chrono::{DateTime, Datelike, Months, NaiveDate};
 use rusqlite::types::FromSql;
 use rusqlite::Connection;
 
-use crate::replica::{quote_ident, report_columns, COL_CLOSE_DATE, COL_CLOSE_DATE_MS, COL_DELETED, REPORT_TABLE};
-
-const COL_PROFIT: &str = "ProfitBTC";
-const COL_SPENT: &str = "SpentBTC";
-const COL_EMULATOR: &str = "Emulator";
-const COL_COIN: &str = "Coin";
+use crate::replica::{
+    close_ms_sql, quote_ident, report_columns, COL_CLOSE_DATE, COL_CLOSE_DATE_MS, COL_COIN, COL_DELETED,
+    COL_EMULATOR, COL_PROFIT, COL_SPENT, REPORT_TABLE,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Period {
+    /// The last 60 minutes, up to now.
+    Hour,
     Today,
     Month,
 }
@@ -34,19 +34,29 @@ pub struct Bounds {
 }
 
 pub fn bounds(period: Period, now_utc_ms: i64, offset_min: i64) -> Bounds {
-    let now = DateTime::from_timestamp_millis(now_utc_ms + offset_min * 60_000)
-        .unwrap_or_default()
-        .date_naive();
+    let now_ms = now_utc_ms + offset_min * 60_000;
+    let now_dt = DateTime::from_timestamp_millis(now_ms).unwrap_or_default();
+    let now = now_dt.date_naive();
+    let midnight = |d: NaiveDate| d.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc().timestamp_millis();
     let (from, to, label) = match period {
-        Period::Today => (now, now.succ_opt().unwrap_or(now), now.format("%d.%m.%Y").to_string()),
+        Period::Hour => {
+            let from = now_ms - HOUR_MS;
+            let from_dt = DateTime::from_timestamp_millis(from).unwrap_or_default();
+            let label = format!("{}–{}", from_dt.format("%d.%m.%Y %H:%M"), now_dt.format("%H:%M"));
+            // A minute's slack for a core whose clock runs a little ahead.
+            (from, now_ms + 60_000, label)
+        }
+        Period::Today => {
+            let next = now.succ_opt().unwrap_or(now);
+            (midnight(now), midnight(next), now.format("%d.%m.%Y").to_string())
+        }
         Period::Month => {
             let first = now.with_day(1).unwrap_or(now);
             let next = first.checked_add_months(Months::new(1)).unwrap_or(now);
-            (first, next, now.format("%B %Y").to_string())
+            (midnight(first), midnight(next), now.format("%B %Y").to_string())
         }
     };
-    let ms = |d: NaiveDate| d.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc().timestamp_millis();
-    Bounds { from: ms(from), to: ms(to), label }
+    Bounds { from, to, label }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -68,10 +78,6 @@ impl Tally {
 
     pub fn losses(&self) -> u32 {
         self.trades - self.wins
-    }
-
-    pub fn pct(&self) -> Option<f64> {
-        (self.volume != 0.0).then(|| self.profit / self.volume * 100.0)
     }
 }
 
@@ -98,6 +104,7 @@ impl CoreTally {
 }
 
 const DAY_MS: i64 = 86_400_000;
+const HOUR_MS: i64 = 3_600_000;
 
 /// `None` while the replica holds no report table yet (never synced).
 pub fn tally(path: &Path, from: i64, to: i64) -> Result<Option<CoreTally>, String> {
@@ -170,7 +177,7 @@ fn sums<K: FromSql>(path: &Path, from: i64, to: i64, group: GroupBy) -> Result<O
         return Err("the core's report has no close date".to_string());
     }
     // The ms column where the core has it; rows older than it are NULL there.
-    let close = col(COL_CLOSE_DATE_MS, &format!("{} * 1000", quote_ident(COL_CLOSE_DATE)));
+    let close = close_ms_sql(cols.contains(COL_CLOSE_DATE_MS), true).unwrap_or_default();
     let profit = col(COL_PROFIT, "0");
     let key = match group {
         GroupBy::Nothing => "0".to_string(),
@@ -226,6 +233,9 @@ mod tests {
         // 22:00 UTC is already the next day on a UTC+3 core.
         let t3 = bounds(Period::Today, now, 180);
         assert_eq!(t3.from, utc(2027, 1, 1, 0));
+        let h = bounds(Period::Hour, now + 30 * 60_000, 180);
+        assert_eq!(h.from, utc(2027, 1, 1, 0) + 30 * 60_000);
+        assert_eq!(h.label, "01.01.2027 00:30–01:30");
     }
 
     #[test]

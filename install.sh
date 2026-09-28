@@ -30,6 +30,11 @@ else
 fi
 
 install -D -m 0755 "$BIN" /opt/pnl-bot/pnl-bot
+# What `pnl --update` compares with the latest release.
+VERSION="$(cat VERSION 2>/dev/null || sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml 2>/dev/null | head -n 1 || true)"
+if [ -n "$VERSION" ]; then
+  echo "$VERSION" > /opt/pnl-bot/VERSION
+fi
 install -m 0755 deploy/pnl-bot-passphrase.sh /usr/local/sbin/pnl-bot-passphrase
 install -m 0755 deploy/pnl.sh /usr/local/bin/pnl
 

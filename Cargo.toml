@@ -5,6 +5,8 @@ description = "Telegram bot reporting PnL from MoonBot cores over MoonProto"
 authors = ["Asmodeios"]
 license = "MIT"
 edition = "2021"
+# `if let` guards in match arms (src/bot/mod.rs) need a recent toolchain.
+rust-version = "1.96"
 publish = false
 
 [dependencies]

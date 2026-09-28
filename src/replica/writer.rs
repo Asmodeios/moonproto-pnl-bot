@@ -1,243 +1,24 @@
-//! A local SQLite replica of one core's `Orders` report database, kept by
-//! MoonProto's report replication (`client.reports()`, the crate's
-//! `docs/reports.md`).
-//!
-//! One writer thread per replica owns the read-write connection and applies
-//! every `ReportEvent` in delivery order, fed by a bare channel send from the
-//! crate's sink thread, which must never block on SQLite. Readers (`pnl.rs`)
-//! open their own connection against the same WAL-mode file.
+//! The writer thread: applies every `ReportEvent` to the replica in
+//! delivery order.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use moonproto::{
     MoonReports, ReportAliveMapComplete, ReportAliveMapOutcome, ReportEvent, ReportHistoryDepth, ReportRow,
-    ReportRowsDeleted, ReportSchema, ReportSchemaField, ReportSyncCheckpoint, ReportSyncComplete, ReportSyncPage,
-    ReportSyncRequest, ReportValue,
+    ReportRowsDeleted, ReportSchema, ReportSyncComplete, ReportSyncPage, ReportSyncRequest,
 };
-use rusqlite::types::{ToSqlOutput, Value as SqlValue, ValueRef};
-use rusqlite::Connection;
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension};
+use tokio::sync::mpsc::UnboundedSender;
 
-pub const REPORT_TABLE: &str = "Orders";
-/// The report protocol's own fixed field names.
-const COL_REC_ID: &str = "newRecID";
-pub const COL_DELETED: &str = "deleted";
-pub const COL_CLOSE_DATE: &str = "CloseDate";
-pub const COL_CLOSE_DATE_MS: &str = "CloseDateMs";
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub enum Phase {
-    #[default]
-    Schema,
-    Page,
-    Complete,
-    Live,
-    Error,
-}
-
-#[derive(Clone, Default)]
-pub struct SyncStatus {
-    pub phase: Phase,
-    /// Rows applied by the catch-up in progress.
-    pub rows_synced: u32,
-    pub error: Option<String>,
-}
-
-/// The session's side of a replica: dropping it ends the writer thread.
-pub struct Replica {
-    tx: mpsc::Sender<ReportEvent>,
-    reports: MoonReports,
-    open_ids: Arc<Mutex<HashSet<i64>>>,
-    status: Arc<Mutex<SyncStatus>>,
-}
-
-impl Replica {
-    /// Open (or reopen) the replica at `path` and start catch-up — from its
-    /// own checkpoint, or fresh for an empty file. The crate resumes report
-    /// catch-up across reconnects of the same session on its own.
-    pub fn open(core_id: &str, path: PathBuf, reports: MoonReports) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let open_ids = Arc::new(Mutex::new(HashSet::new()));
-        let status = Arc::new(Mutex::new(SyncStatus::default()));
-        {
-            let core_id = core_id.to_string();
-            let reports = reports.clone();
-            let open_ids = Arc::clone(&open_ids);
-            let status = Arc::clone(&status);
-            std::thread::spawn(move || run_writer(core_id, path, rx, reports, open_ids, status));
-        }
-        Self { tx, reports, open_ids, status }
-    }
-
-    pub fn send(&self, event: ReportEvent) {
-        let _ = self.tx.send(event);
-    }
-
-    pub fn status(&self) -> SyncStatus {
-        self.status.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    /// The open rows, to register again with the core so a close or change
-    /// outside catch-up range — or while offline — still reaches the replica.
-    /// Taken under the sessions lock, sent outside it.
-    pub fn open_rows(&self) -> OpenRows {
-        let ids = self.open_ids.lock().map(|s| s.iter().copied().collect()).unwrap_or_default();
-        OpenRows { reports: self.reports.clone(), ids }
-    }
-}
-
-pub struct OpenRows {
-    reports: MoonReports,
-    ids: Vec<i64>,
-}
-
-impl OpenRows {
-    pub fn send(self) {
-        if !self.ids.is_empty() {
-            let _ = self.reports.check_open_rows(&self.ids);
-        }
-    }
-}
-
-pub fn remove_files(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(sidecar(path, "-wal"));
-    let _ = std::fs::remove_file(sidecar(path, "-shm"));
-}
-
-fn sidecar(path: &Path, suffix: &str) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(suffix);
-    PathBuf::from(s)
-}
-
-pub fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// The report table's column names; empty before it exists.
-pub fn report_columns(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(REPORT_TABLE)))?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-    rows.collect()
-}
-
-fn history_depth_label(depth: ReportHistoryDepth) -> String {
-    match depth {
-        ReportHistoryDepth::ServerDefault => "serverDefault".to_string(),
-        ReportHistoryDepth::All => "all".to_string(),
-        ReportHistoryDepth::Days(n) => format!("days:{n}"),
-    }
-}
-
-fn history_depth_from_label(label: &str) -> ReportHistoryDepth {
-    if label == "all" {
-        ReportHistoryDepth::All
-    } else if let Some(n) = label.strip_prefix("days:").and_then(|s| s.parse::<u16>().ok()) {
-        ReportHistoryDepth::Days(n)
-    } else {
-        ReportHistoryDepth::ServerDefault
-    }
-}
-
-fn to_sql_value(v: Option<&ReportValue>) -> ToSqlOutput<'_> {
-    ToSqlOutput::Borrowed(match v {
-        None => ValueRef::Null,
-        Some(ReportValue::Integer(i)) => ValueRef::Integer(*i),
-        Some(ReportValue::Float(f)) => ValueRef::Real(*f),
-        Some(ReportValue::Text(s)) => ValueRef::Text(s.as_bytes()),
-    })
-}
-
-fn as_i64(v: &ReportValue) -> Option<i64> {
-    match v {
-        ReportValue::Integer(i) => Some(*i),
-        _ => None,
-    }
-}
-
-fn bind_values<'a>(fields: &[ReportSchemaField], row: &'a ReportRow) -> Vec<ToSqlOutput<'a>> {
-    fields.iter().map(|f| to_sql_value(row.value(f.index))).collect()
-}
-
-fn build_upsert_sql(columns: &[String], rec_id_col: &str) -> String {
-    let cols = columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
-    let params = vec!["?"; columns.len()].join(", ");
-    let updates = columns
-        .iter()
-        .filter(|c| c.as_str() != rec_id_col)
-        .map(|c| {
-            let q = quote_ident(c);
-            format!("{q}=excluded.{q}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO {table} ({cols}) VALUES ({params}) ON CONFLICT({rec}) DO UPDATE SET {updates}",
-        table = quote_ident(REPORT_TABLE),
-        rec = quote_ident(rec_id_col),
-    )
-}
-
-fn open_connection(path: &Path) -> Result<Connection, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("could not create reports dir: {e}"))?;
-    }
-    let conn = Connection::open(path).map_err(|e| format!("could not open replica: {e}"))?;
-    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-        .map_err(|e| e.to_string())?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS _sync_meta (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            epoch INTEGER NOT NULL,
-            next_from_rec_id INTEGER NOT NULL,
-            history_depth TEXT NOT NULL,
-            synced_at INTEGER NOT NULL
-        )",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn)
-}
-
-fn read_checkpoint(conn: &Connection) -> Option<(ReportSyncCheckpoint, ReportHistoryDepth)> {
-    conn.query_row("SELECT epoch, next_from_rec_id, history_depth FROM _sync_meta WHERE id=1", [], |row| {
-        let epoch: i64 = row.get(0)?;
-        let next: i64 = row.get(1)?;
-        let depth: String = row.get(2)?;
-        Ok((ReportSyncCheckpoint { epoch: epoch as i32, next_from_rec_id: next }, history_depth_from_label(&depth)))
-    })
-    .ok()
-}
-
-/// The report table as the schema lays it out — none until the first
-/// `Schema` event, and again after the database is recreated.
-struct Table {
-    fields: Vec<ReportSchemaField>,
-    rec_id_col: String,
-    upsert_sql: String,
-    delete_sql: String,
-    close_idx: Option<u16>,
-    close_ms_idx: Option<u16>,
-}
-
-impl Table {
-    /// A row with no close date yet is open — kept for `check_open_rows`.
-    fn track_open(&self, open: &mut HashSet<i64>, row: &ReportRow) {
-        let ms = self.close_ms_idx.and_then(|i| row.value(i)).and_then(as_i64);
-        let secs = self.close_idx.and_then(|i| row.value(i)).and_then(as_i64);
-        let is_open = ms.or_else(|| secs.map(|s| s.saturating_mul(1000))).unwrap_or(0) == 0;
-        if is_open {
-            open.insert(row.rec_id);
-        } else {
-            open.remove(&row.rec_id);
-        }
-    }
-}
+use super::sql::{
+    bind_values, build_upsert_sql, close_ms_sql, history_depth_label, open_connection, quote_ident, read_checkpoint, report_columns,
+    Table,
+};
+use super::{ClosedTrade, Phase, SyncStatus, COL_CLOSE_DATE, COL_CLOSE_DATE_MS, COL_DELETED, COL_REC_ID, REPORT_TABLE};
 
 struct Writer {
     core_id: String,
@@ -245,6 +26,7 @@ struct Writer {
     reports: MoonReports,
     open_ids: Arc<Mutex<HashSet<i64>>>,
     status: Arc<Mutex<SyncStatus>>,
+    closed: UnboundedSender<ClosedTrade>,
     table: Option<Table>,
     history_depth: ReportHistoryDepth,
     pending_sync_complete: Option<ReportSyncComplete>,
@@ -254,13 +36,14 @@ struct Writer {
     cached_schema: Option<Arc<ReportSchema>>,
 }
 
-fn run_writer(
+pub(super) fn run_writer(
     core_id: String,
     path: PathBuf,
     rx: mpsc::Receiver<ReportEvent>,
     reports: MoonReports,
     open_ids: Arc<Mutex<HashSet<i64>>>,
     status: Arc<Mutex<SyncStatus>>,
+    closed: UnboundedSender<ClosedTrade>,
 ) {
     let conn = match open_connection(&path) {
         Ok(c) => c,
@@ -278,6 +61,7 @@ fn run_writer(
         reports,
         open_ids,
         status,
+        closed,
         table: None,
         history_depth: ReportHistoryDepth::ServerDefault,
         pending_sync_complete: None,
@@ -383,6 +167,8 @@ impl Writer {
             }
         }
         let columns: Vec<String> = schema.fields().iter().map(|f| f.name.clone()).collect();
+        let close_ms_idx = schema.field_by_name(COL_CLOSE_DATE_MS).map(|f| f.index);
+        let close_expr = close_ms_sql(close_ms_idx.is_some(), close_idx.is_some());
         let rec_id_col = schema
             .field(schema.rec_id_field_index())
             .map(|f| f.name.clone())
@@ -391,9 +177,12 @@ impl Writer {
             fields: schema.fields().to_vec(),
             upsert_sql: build_upsert_sql(&columns, &rec_id_col),
             delete_sql: format!("DELETE FROM {} WHERE {}=?1", quote_ident(REPORT_TABLE), quote_ident(&rec_id_col)),
+            close_sql: close_expr.map(|e| {
+                format!("SELECT {e} FROM {} WHERE {}=?1", quote_ident(REPORT_TABLE), quote_ident(&rec_id_col))
+            }),
             rec_id_col,
             close_idx,
-            close_ms_idx: schema.field_by_name(COL_CLOSE_DATE_MS).map(|f| f.index),
+            close_ms_idx,
         });
     }
 
@@ -444,6 +233,18 @@ impl Writer {
         let Some(table) = &self.table else {
             return;
         };
+        // Only live upserts announce a close — catch-up pages never do, so a
+        // restart doesn't replay history. A row already stored closed is a
+        // later edit of the same trade (price, partial fill).
+        let close_ms = table.close_ms(row);
+        let newly_closed = close_ms != 0
+            && table.int(row, COL_DELETED) == 0
+            && table.close_sql.as_ref().is_some_and(|sql| {
+                self.conn
+                    .prepare_cached(sql)
+                    .and_then(|mut stmt| stmt.query_row([row.rec_id], |r| r.get::<_, Option<i64>>(0)).optional())
+                    .is_ok_and(|before| before.flatten().unwrap_or(0) == 0)
+            });
         let values = bind_values(&table.fields, row);
         let upserted = self
             .conn
@@ -455,6 +256,9 @@ impl Writer {
         }
         if let Ok(mut open) = self.open_ids.lock() {
             table.track_open(&mut open, row);
+        }
+        if newly_closed {
+            let _ = self.closed.send(table.closed_trade(&self.core_id, row, close_ms));
         }
     }
 

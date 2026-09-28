@@ -13,8 +13,55 @@ Usage: pnl <command>
   --logs         Follow the log (Ctrl+C to leave); --logs N prints the last N lines
   --link         Print the claim link, while the bot has no owner
   --passphrase   Set, change or remove the passphrase on the core keys
+  --update       Download and install the latest release (--update --force reinstalls it)
   --help         Show this help
 EOF
+}
+
+REPO=Asmodeios/moonproto-pnl-bot
+
+# Downloads the latest release for this CPU, checks it against the release's
+# SHA256SUMS and runs its install.sh, which keeps the token, owner and cores
+# and restarts the service.
+update() {
+  local arch tag current tmp archive base
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    *) echo "There is no release for this CPU ($(uname -m)). Build from source instead." >&2; exit 1 ;;
+  esac
+  for tool in curl tar sha256sum; do
+    command -v "$tool" >/dev/null || { echo "pnl --update needs $tool: apt install $tool" >&2; exit 1; }
+  done
+
+  # /releases/latest redirects to the newest release's tag page.
+  tag="$(curl -fsSLI --proto '=https' -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")" \
+    || { echo "Could not reach GitHub." >&2; exit 1; }
+  tag="${tag##*/}"
+  if ! [[ "$tag" =~ ^v[0-9] ]]; then
+    echo "No release found on https://github.com/$REPO/releases" >&2
+    exit 1
+  fi
+  # Written by install.sh; missing on installs older than this command.
+  current="$(cat /opt/pnl-bot/VERSION 2>/dev/null || true)"
+  if [ "v$current" = "$tag" ] && [ "${1:-}" != --force ]; then
+    echo "pnl-bot $current is the latest version. To reinstall it: pnl --update --force"
+    return
+  fi
+
+  echo "==> Downloading pnl-bot $tag ($arch)${current:+, installed: v$current}"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  archive="pnl-bot-linux-$arch.tar.gz"
+  base="https://github.com/$REPO/releases/download/$tag"
+  curl -fsSL --proto '=https' -o "$tmp/$archive" "$base/$archive"
+  curl -fsSL --proto '=https' -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
+  if ! (cd "$tmp" && grep " $archive\$" SHA256SUMS | sha256sum -c --quiet -); then
+    echo "The download does not match SHA256SUMS. Nothing was installed." >&2
+    exit 1
+  fi
+  tar -xzf "$tmp/$archive" -C "$tmp"
+  "$tmp/pnl-bot/install.sh"
 }
 
 CMD="${1:---help}"
@@ -62,6 +109,9 @@ case "$CMD" in
     ;;
   --passphrase)
     exec /usr/local/sbin/pnl-bot-passphrase
+    ;;
+  --update)
+    update "${2:-}"
     ;;
   *)
     echo "Unknown command: $CMD" >&2

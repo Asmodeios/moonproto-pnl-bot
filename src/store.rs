@@ -49,6 +49,10 @@ pub struct Settings {
     /// Emulator trades as their own rows in the reports.
     pub show_emulator: bool,
     pub report_format: ReportFormat,
+    /// A message for each trade a core closes, as it closes.
+    pub live_trades: bool,
+    /// By core and by coin reports in name order rather than by profit.
+    pub sort_by_name: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -163,12 +167,8 @@ impl Store {
         self.data.lock().map(|d| d.settings).unwrap_or_default()
     }
 
-    pub fn set_show_emulator(&self, show: bool) -> Result<(), String> {
-        self.edit(|d| d.settings.show_emulator = show)
-    }
-
-    pub fn set_report_format(&self, format: ReportFormat) -> Result<(), String> {
-        self.edit(|d| d.settings.report_format = format)
+    pub fn edit_settings(&self, f: impl FnOnce(&mut Settings)) -> Result<(), String> {
+        self.edit(|d| f(&mut d.settings))
     }
 
     pub fn all(&self) -> Vec<CoreEntry> {

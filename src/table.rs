@@ -46,8 +46,7 @@ pub enum Kind {
     Total,
 }
 
-/// What a report's rows are: one per core, one per coin, or one per day with a
-/// running total.
+/// What a report's rows are: one per core, one per coin, or one per day.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum By {
     Core,
@@ -75,8 +74,6 @@ pub struct Row {
     /// `None` shows dashes: no history yet, or it could not be read.
     pub tally: Option<Tally>,
     pub currency: String,
-    /// The profit summed up to this day, in a [`By::Date`] report.
-    pub cumulative: Option<f64>,
 }
 
 pub struct Report {
@@ -115,18 +112,12 @@ pub struct Cells {
     volume: String,
     avg: String,
     pub profit: String,
-    pub pct: String,
-    /// Empty without a running total.
-    pub cumulative: String,
     sign: f64,
-    cumulative_sign: f64,
 }
 
 pub fn cells(row: &Row) -> Cells {
     let dash = || "—".to_string();
     let unit = unit(&row.currency);
-    let cumulative = row.cumulative.map(|c| format!("{}{unit}", signed(c))).unwrap_or_default();
-    let cumulative_sign = row.cumulative.map_or(0.0, rounded);
     let Some(t) = row.tally else {
         return Cells {
             orders: dash(),
@@ -134,10 +125,7 @@ pub fn cells(row: &Row) -> Cells {
             volume: dash(),
             avg: dash(),
             profit: dash(),
-            pct: dash(),
-            cumulative,
             sign: 0.0,
-            cumulative_sign,
         };
     };
     let avg = if t.trades > 0 { t.volume / f64::from(t.trades) } else { 0.0 };
@@ -147,10 +135,7 @@ pub fn cells(row: &Row) -> Cells {
         volume: format!("{}{unit}", compact(t.volume)),
         avg: if t.trades > 0 { format!("{}{unit}", compact(avg)) } else { dash() },
         profit: format!("{}{unit}", signed(t.profit)),
-        pct: t.pct().map(|p| format!("{}%", signed(p))).unwrap_or_else(dash),
-        cumulative,
         sign: rounded(t.profit),
-        cumulative_sign,
     }
 }
 
@@ -178,15 +163,12 @@ fn columns(by: By, total: bool, c: &Cells) -> Vec<Column<'_>> {
             (&c.volume, NUM, total),
             (&c.avg, NUM, false),
             (&c.profit, profit, true),
-            (&c.pct, profit, false),
         ],
         By::Date => vec![
             (&c.orders, NUM, total),
             (&c.wl, DIM, false),
             (&c.volume, NUM, total),
             (&c.profit, profit, true),
-            (&c.pct, profit, false),
-            (&c.cumulative, money(c.cumulative_sign), false),
         ],
     }
 }
@@ -194,8 +176,8 @@ fn columns(by: By, total: bool, c: &Cells) -> Vec<Column<'_>> {
 fn svg(report: &Report) -> String {
     let name = report.by.name().to_uppercase();
     let rest: &[&str] = match report.by {
-        By::Core | By::Coin => &["ORDERS", "W/L", "VOLUME", "AVG ORDER", "PROFIT", "%"],
-        By::Date => &["ORDERS", "W/L", "VOLUME", "PROFIT", "%", "CUMULATIVE"],
+        By::Core | By::Coin => &["ORDERS", "W/L", "VOLUME", "AVG ORDER", "PROFIT"],
+        By::Date => &["ORDERS", "W/L", "VOLUME", "PROFIT"],
     };
     let heads: Vec<&str> = std::iter::once(name.as_str()).chain(rest.iter().copied()).collect();
     let cells: Vec<Cells> = report.rows.iter().map(cells).collect();
@@ -301,7 +283,7 @@ fn esc(s: &str) -> String {
 }
 
 /// `$` for dollars and their stablecoins, the code otherwise.
-fn unit(currency: &str) -> String {
+pub fn unit(currency: &str) -> String {
     match currency.to_ascii_uppercase().as_str() {
         "" | "USD" | "USDT" | "USDC" | "BUSD" | "FDUSD" | "TUSD" => "$".to_string(),
         other => format!(" {other}"),
@@ -325,7 +307,7 @@ fn compact(v: f64) -> String {
 }
 
 /// Two decimals with the sign, and no `-0.00`.
-fn signed(v: f64) -> String {
+pub fn signed(v: f64) -> String {
     format!("{:+.2}", rounded(v))
 }
 
@@ -349,9 +331,8 @@ mod tests {
             kind,
             tally,
             currency: "USDT".into(),
-            cumulative: None,
         };
-        let day = |name: &str, tally, cumulative| Row { cumulative: Some(cumulative), ..row(name, "", Kind::Core, tally) };
+        let day = |name: &str, tally| row(name, "", Kind::Core, tally);
         let by_date = Report {
             title: "Month".into(),
             label: "September 2026 · by date".into(),
@@ -359,10 +340,10 @@ mod tests {
             footer: "Closed trades by close time, UTC".into(),
             by: By::Date,
             rows: vec![
-                day("2026-09-24", t(7, 5, 85.82, 44_000.0), 5377.64),
-                day("2026-09-23", t(26, 15, -225.02, 112_000.0), 5291.81),
-                day("2026-09-19", t(18, 16, 1179.70, 86_000.0), 1637.09),
-                day("2026-09-18", t(5, 4, 457.39, 19_000.0), 457.39),
+                day("2026-09-24", t(7, 5, 85.82, 44_000.0)),
+                day("2026-09-23", t(26, 15, -225.02, 112_000.0)),
+                day("2026-09-19", t(18, 16, 1179.70, 86_000.0)),
+                day("2026-09-18", t(5, 4, 457.39, 19_000.0)),
                 row("TOTAL", "", Kind::Total, t(56, 40, 1497.89, 261_000.0)),
                 row("TOTAL", "emulator", Kind::Total, t(2, 1, -376.01, 7_915.9)),
             ],

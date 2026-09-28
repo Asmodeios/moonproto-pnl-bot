@@ -16,7 +16,9 @@ use moonproto::{
     MoonClientEvent, MoonEventSink, RefreshConfig, TransportMode,
 };
 
-use crate::replica::{self, Replica, SyncStatus};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::replica::{self, ClosedTrade, Replica, SyncStatus};
 use crate::store::{CoreEntry, Store};
 
 const SUPERVISE_EVERY: Duration = Duration::from_secs(60);
@@ -52,6 +54,8 @@ pub struct Cores {
     me: Weak<Cores>,
     reports_dir: PathBuf,
     store: Arc<Store>,
+    /// Every replica's live closes, for the Live trades feed.
+    closed: UnboundedSender<ClosedTrade>,
     sessions: Mutex<HashMap<String, Session>>,
     /// The last connect failure logged per core — a core that stays down is
     /// retried every minute, and logged only when the reason changes.
@@ -59,11 +63,12 @@ pub struct Cores {
 }
 
 impl Cores {
-    pub fn new(reports_dir: PathBuf, store: Arc<Store>) -> Arc<Self> {
+    pub fn new(reports_dir: PathBuf, store: Arc<Store>, closed: UnboundedSender<ClosedTrade>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             reports_dir,
             store,
+            closed,
             sessions: Mutex::new(HashMap::new()),
             logged_failure: Mutex::new(HashMap::new()),
         })
@@ -99,7 +104,7 @@ impl Cores {
         let started = MoonClient::connect_with_sink(cfg, ConnectConfig::new(init), sink);
         let result = match started {
             Ok(client) => {
-                let replica = Replica::open(&entry.id, self.replica_path(&entry.id), client.reports());
+                let replica = Replica::open(&entry.id, self.replica_path(&entry.id), client.reports(), self.closed.clone());
                 sessions.insert(
                     entry.id.clone(),
                     Session {

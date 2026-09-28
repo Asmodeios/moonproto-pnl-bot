@@ -16,22 +16,25 @@ The bot answers only one person: its owner.
 
 Send `/start` to open the menu.
 
-- **📊 Today** / **📅 Month** — PnL for each core and the total. The bot sends it as a table picture
-  (or as text, see Settings). The table has: orders, wins/losses, volume, average order, profit,
-  and profit as % of volume.
+- **⏱ Hour** / **📊 Today** / **📅 Month** — PnL for each core and the total. **⏱ Hour** covers the
+  last 60 minutes. The bot sends it as a table picture (or as text, see Settings). The table has:
+  orders, wins/losses, volume, average order and profit.
   **🔄 Refresh** updates the message.
-  **📊 Today** has a button to change between **🖥 By core** and **🪙 By coin**.
-  **📅 Month** first asks you to choose a view:
+  **⏱ Hour** and **📊 Today** open **🖥 By core**, with a button to change to **🪙 By coin**.
+  **📅 Month** opens **📆 By date**, with buttons to change to the other views:
   - **🖥 By core** — the same table, one row for each core.
   - **🪙 By coin** — all cores added together, one row for each coin. The coins with the biggest profit
     or loss are first. Emulator trades of a coin are shown in a separate row under it. If there are more
     than 20 coins, the table shows 20 of them, and one row ("N others") with the sum of the rest.
   - **📆 By date** — all cores added together, one row for each day with trades. The newest day is first.
-    Each row has: orders, wins/losses, volume, profit, profit %, and the total profit of the month
-    up to that day. The last row is the total for the month.
+    Each row has: orders, wins/losses, volume and profit. The last row is the total for the month.
     Emulator trades are shown only in a separate total row.
 
-  The month report has buttons to change to the other views.
+  **🔤 Sort by name** / **💰 Sort by profit** on **🖥 By core** and **🪙 By coin** switches the row order
+  between profit (the default) and name. The bot remembers the choice. With more than 20 coins, the same
+  20 are shown either way.
+
+  Every report also has buttons to open the other periods.
 - **🖥 Cores** — your cores and their state:
   🟢 live, 🟡 connecting or syncing, 🟠 reconnecting, 🔴 offline.
   One page shows 7 cores. If you have more, use **◀ Prev** / **Next ▶**.
@@ -58,12 +61,19 @@ Send `/start` to open the menu.
 - **⚙️ Settings**
   - **Emulator trades:** show or hide them in reports. They are hidden by default.
   - **Reports come as:** a text message (default) or a table picture. The text report is a small table
-    that fits on a phone screen. It has only orders, wins/losses, profit and profit %.
+    that fits on a phone screen. It has only orders, wins/losses and profit.
     It does not show volume, average order or the exchange.
+  - **Live trades:** on or off (default off). When it is on, the bot tells you about each trade your cores
+    close: the coin, long or short, the core, profit and profit %, how long the trade was open, the sell
+    reason and the strategy (for a liquidation, the strategy from its signal type). The bot waits 5 seconds
+    after a trade closes and sends all trades closed in that time, on all cores, in one message. So many
+    trades at once do not make many messages. Emulator trades come only if they are shown in reports.
+    Trades that closed more than 10 minutes ago (for example, while the core or the bot was offline) are
+    not sent, but they are still counted in the reports.
 
-  The bot saves both settings. They stay after a restart.
+  The bot saves all settings. They stay after a restart.
 
-Commands: `/menu`, `/today`, `/month`, `/cores`, `/settings`, `/cancel`.
+Commands: `/menu`, `/hour`, `/today`, `/month`, `/cores`, `/settings`, `/cancel`.
 
 The numbers count only closed trades, by the time they closed. Open positions are not counted.
 Reports use the clock of the core. If your cores do not use UTC time, set `REPORT_UTC_OFFSET_MINUTES`.
@@ -111,7 +121,18 @@ Reports use the clock of the core. If your cores do not use UTC time, set `REPOR
 
 ### Update
 
-Copy the new archive to the VPS in the same way. Then run on the VPS:
+Run on the VPS:
+
+```sh
+pnl --update
+```
+
+It downloads the newest release for your CPU from GitHub, checks it against `SHA256SUMS`,
+installs it and restarts the bot. If you already have the newest version, it does nothing
+(`pnl --update --force` installs it again). If you use a passphrase, send it to the bot again after the update.
+
+To update by hand (or from a version older than 0.1.4, which has no `pnl --update`), copy the new archive
+to the VPS in the same way as the first time. Then run on the VPS:
 
 ```sh
 cd ~
@@ -143,6 +164,7 @@ It asks for your password (with `sudo`) when it needs it.
 | `pnl --logs 100` | Show the last 100 lines of the log and exit. |
 | `pnl --link` | Show the link to become the owner (only while the bot has no owner). |
 | `pnl --passphrase` | Set, change or remove the [passphrase](#passphrase). |
+| `pnl --update` | Download and install the newest release, see [Update](#update). |
 | `pnl --help` | Show this list. |
 
 The bot runs as a system service named `pnl-bot`. If it crashes or the server reboots,
@@ -248,18 +270,15 @@ Then run `cargo run --release`.
 
 ## How it works
 
-| File | What it does |
-|---|---|
-| `src/main.rs` | Start: reads the settings, loads the data, checks the token (`getMe`), makes the owner code if there is no owner, connects to each core, runs the bot, and stops cleanly on SIGTERM. |
-| `src/config.rs` | Reads the environment variables. |
-| `src/store.rs` | `cores.json`: the owner and the cores. Safe (atomic) writes, owner-only file permissions, keys encrypted with the passphrase. |
-| `src/lock.rs` | The passphrase: makes the key with Argon2id, encrypts with XChaCha20-Poly1305. |
-| `src/cores.rs` | MoonProto connections: the state of each link, the local report copy for each core, and a new try every minute for cores that could not connect. |
-| `src/replica.rs` | The local report copy: database updates, first download page by page, live changes and deletes, checks against the core, and a saved checkpoint. |
-| `src/pnl.rs` | The time periods and the SQL that adds up the numbers. |
-| `src/table.rs` | Draws the report as a PNG table (SVG drawn by resvg; font JetBrains Mono, OFL license, from `assets/fonts/`). |
-| `src/telegram.rs` | The Telegram Bot API calls (long polling; sending the report pictures). |
-| `src/bot.rs` | Owner claim, unlock, screens, buttons, and adding and deleting cores. |
+1. **Connect.** The bot connects to each core with the MoonProto SDK, using the core's key.
+   It talks to the core directly over UDP. No other server is in between.
+2. **Copy.** The first time, the bot downloads the core's `Orders` report and saves it in a local database.
+   After that, the core sends new and changed trades live, and the bot updates its copy.
+   If a core goes offline, the bot tries again every minute and catches up when the core is back.
+3. **Count.** When you ask for a report, the bot adds up the closed trades from its local copy.
+   It does not ask the core, so the answer is fast.
+4. **Answer.** The bot gets your commands and button presses from Telegram and sends back the report
+   as text or a table picture. With **Live trades** on, it also sends a message when a trade closes.
 
 The MoonProto library is fixed to one commit in `Cargo.toml`.
 

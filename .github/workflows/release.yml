@@ -46,6 +46,11 @@ jobs:
         with:
           key: ${{ env.TARGET }}
 
+      # On the release target and profile, so Build reuses what this compiles:
+      # a tagged release never ships failing tests.
+      - name: Test
+        run: cargo test --release --locked --target "$TARGET"
+
       - name: Build
         run: cargo build --release --locked --target "$TARGET"
 
@@ -76,6 +81,7 @@ jobs:
           mkdir -p out/pnl-bot/deploy
           cp "target/$TARGET/release/pnl-bot" install.sh .env.example README.md LICENSE out/pnl-bot/
           cp deploy/pnl-bot.service deploy/pnl-bot-passphrase.sh deploy/pnl.sh out/pnl-bot/deploy/
+          grep -m1 '^version' Cargo.toml | cut -d'"' -f2 > out/pnl-bot/VERSION
           chmod 755 out/pnl-bot/pnl-bot out/pnl-bot/install.sh
           file out/pnl-bot/pnl-bot
           tar -C out -czf "pnl-bot-linux-${{ matrix.arch }}.tar.gz" pnl-bot

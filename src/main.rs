@@ -58,7 +58,8 @@ async fn run() -> Result<(), String> {
     };
     let link = claim_code.as_ref().map(|code| format!("https://t.me/{username}?start={code}"));
     let status = status::Status::new(&cfg.data_dir, link);
-    let cores = cores::Cores::new(cfg.data_dir.join("reports"), Arc::clone(&store));
+    let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cores = cores::Cores::new(cfg.data_dir.join("reports"), Arc::clone(&store), closed_tx);
     // Locked, the cores connect once the owner sends the passphrase.
     let locked = store.is_locked();
     if !locked {
@@ -67,6 +68,7 @@ async fn run() -> Result<(), String> {
     cores.supervise();
 
     let bot = bot::Bot::new(tg, claim_code, cfg.report_offset_min, Arc::clone(&store), Arc::clone(&cores), status.clone());
+    bot.live_trades(closed_rx);
     let note = if locked { " — locked until the owner sends the passphrase" } else { "" };
     log::info!("@{username} started with {} core(s){note}", store.all().len());
     status.update(&store);
