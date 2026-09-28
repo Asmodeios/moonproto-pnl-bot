@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use serde_json::{json, Value};
+use unicode_width::UnicodeWidthStr;
 
 use super::{Bot, Follow, Screen};
 use crate::pnl::{self, CoreTally, Period, Tally};
@@ -128,7 +129,8 @@ impl Bot {
     }
 
     /// A row per core — two with emulator trades — best profit first, or by
-    /// name, then the totals when there are several cores.
+    /// name, then the totals when there are several cores. Cores without
+    /// trades in the period are left out.
     fn core_rows(
         &self,
         cores: &[CoreEntry],
@@ -155,7 +157,10 @@ impl Bot {
             let key = match tally {
                 Ok(Some(CoreTally { real, emulator })) => {
                     let emulator = if show_emu { emulator } else { Tally::default() };
-                    if real.trades > 0 || emulator.trades == 0 {
+                    if real.trades == 0 && emulator.trades == 0 {
+                        continue;
+                    }
+                    if real.trades > 0 {
                         rows.push(row(exchange.clone(), table::Kind::Core, Some(real)));
                         real_total.entry(cur.clone()).or_default().merge(&real);
                     }
@@ -180,7 +185,10 @@ impl Bot {
             groups.sort_by(|a, b| b.0.total_cmp(&a.0));
         }
         let mut rows: Vec<table::Row> = groups.into_iter().flat_map(|(_, rows)| rows).collect();
-        if cores.len() > 1 {
+        if cores.len() > 1 || rows.is_empty() {
+            if real_total.is_empty() {
+                real_total.insert(cores.first().map(|c| c.currency.clone()).unwrap_or_default(), Tally::default());
+            }
             rows.extend(total_rows(&real_total, &emu_total));
         }
         rows
@@ -381,7 +389,7 @@ fn report_text(report: &table::Report) -> String {
     let mut w = vec![0usize; lines[0].len()];
     for line in &lines {
         for (w, cell) in w.iter_mut().zip(line) {
-            *w = (*w).max(cell.chars().count());
+            *w = (*w).max(cell.width());
         }
     }
     let mut pre = String::new();
@@ -389,23 +397,26 @@ fn report_text(report: &table::Report) -> String {
         if i == body && body < lines.len() {
             pre.push_str(&format!("{}\n", "─".repeat(w.iter().sum::<usize>() + 2 * (w.len() - 1))));
         }
-        // The name left-aligned, the figures right.
+        // The name left-aligned, the figures right. Padded by display width,
+        // not chars — `format!` counts a CJK character as one column.
         let cells: Vec<String> = line
             .iter()
             .zip(&w)
             .enumerate()
-            .map(|(i, (cell, &w))| if i == 0 { format!("{cell:w$}") } else { format!("{cell:>w$}") })
+            .map(|(i, (cell, &w))| {
+                let pad = " ".repeat(w - cell.width());
+                if i == 0 { format!("{cell}{pad}") } else { format!("{pad}{cell}") }
+            })
             .collect();
         pre.push_str(&cells.join("  "));
         pre.push('\n');
     }
     format!(
-        "<b>{}</b> — {}\n<pre>{}</pre>\n<i>{} · {}</i>",
+        "<b>{}</b> — {}\n<pre>{}</pre>\n<i>{}</i>",
         escape(&report.title),
         escape(&report.label),
         // Only the newline: a TOTAL row's blank last cell is padding that lines up.
         escape(pre.trim_end_matches('\n')),
-        escape(&report.footer),
         escape(&report.updated)
     )
 }
@@ -508,7 +519,7 @@ mod tests {
             let text = report_text(report);
             let pre = text.split("<pre>").nth(1).and_then(|s| s.split("</pre>").next()).unwrap().to_string();
             let pre = pre.replace("&lt;", "<").replace("&gt;", ">");
-            let widths: Vec<usize> = pre.lines().map(|l| l.chars().count()).collect();
+            let widths: Vec<usize> = pre.lines().map(|l| l.width()).collect();
             assert!(widths.iter().all(|&w| w == widths[0]), "{widths:?}");
             pre
         };
@@ -537,6 +548,7 @@ mod tests {
                 row("Bin9", "ByBit Futures", table::Kind::Core, t(95, 67, 1087.85, 271_962.5)),
                 row("Bin9", "emulator", table::Kind::Emulator, t(2, 1, -376.01, 7_915.9)),
                 row("test<1>", "", table::Kind::Core, None),
+                row("龙虾", "", table::Kind::Core, t(148, 105, 1413.73, 90_000.0)),
                 row("TOTAL", "", table::Kind::Total, t(97, 68, 711.84, 279_878.4)),
             ],
         };
