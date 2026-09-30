@@ -64,8 +64,11 @@ fi
 chmod 600 "$ENV_FILE"
 
 install -m 0644 deploy/pnl-bot.service "$UNIT"
+# Runs `pnl --update` when the owner presses Update in Telegram.
+install -m 0644 deploy/pnl-bot-update.path deploy/pnl-bot-update.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable pnl-bot >/dev/null 2>&1
+systemctl enable --now pnl-bot-update.path >/dev/null 2>&1
 # The bot writes where it stands to this file (src/status.rs); cleared so a
 # stale one from an earlier run isn't read.
 STATUS_FILE=/var/lib/private/pnl-bot/status

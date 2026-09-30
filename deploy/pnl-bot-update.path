@@ -1,0 +1,11 @@
+[Unit]
+Description=Update pnl-bot when the bot asks for it
+
+# The bot (an unprivileged DynamicUser) leaves this file in its state
+# directory when the owner presses Update in Telegram (src/update.rs).
+[Path]
+PathExists=/var/lib/private/pnl-bot/update-request
+Unit=pnl-bot-update.service
+
+[Install]
+WantedBy=paths.target

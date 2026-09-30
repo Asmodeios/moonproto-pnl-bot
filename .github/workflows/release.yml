@@ -80,7 +80,8 @@ jobs:
         run: |
           mkdir -p out/pnl-bot/deploy
           cp "target/$TARGET/release/pnl-bot" install.sh .env.example README.md LICENSE out/pnl-bot/
-          cp deploy/pnl-bot.service deploy/pnl-bot-passphrase.sh deploy/pnl.sh out/pnl-bot/deploy/
+          cp deploy/pnl-bot.service deploy/pnl-bot-update.path deploy/pnl-bot-update.service \
+            deploy/pnl-bot-passphrase.sh deploy/pnl.sh out/pnl-bot/deploy/
           grep -m1 '^version' Cargo.toml | cut -d'"' -f2 > out/pnl-bot/VERSION
           chmod 755 out/pnl-bot/pnl-bot out/pnl-bot/install.sh
           file out/pnl-bot/pnl-bot

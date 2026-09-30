@@ -10,6 +10,7 @@ use crate::cores::{self, CoreView, Link};
 use crate::replica::Phase;
 use crate::store::ReportFormat;
 use crate::telegram::{button, escape};
+use crate::update::CURRENT;
 
 /// Cores per page of the Cores screen — its table rows and ✏️/🗑 buttons.
 const CORES_PER_PAGE: usize = 7;
@@ -31,8 +32,13 @@ impl Bot {
             format!("Cores: {} · online: {online}", cores.len())
         };
         let periods: Vec<Value> = PERIODS.iter().map(|&p| period_button(p)).collect();
-        let kb = json!([periods, [button("🖥 Cores", "c"), button("⚙️ Settings", "s")]]);
-        (format!("<b>MoonBot PnL</b>\n\n{body}"), kb)
+        let mut rows = vec![Value::Array(periods), json!([button("🖥 Cores", "c"), button("⚙️ Settings", "s")])];
+        let mut text = format!("<b>MoonBot PnL</b>\n\n{body}");
+        if let Some(v) = self.new_version() {
+            text.push_str(&format!("\n\n⬆️ Version v{v} is out (this is v{CURRENT})."));
+            rows.push(json!([button(&format!("⬆️ Update to v{v}"), "u")]));
+        }
+        (text, Value::Array(rows))
     }
 
     pub(super) fn settings_screen(&self) -> (String, Value) {

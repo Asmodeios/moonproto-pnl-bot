@@ -1,0 +1,13 @@
+[Unit]
+Description=Install the latest pnl-bot release
+
+# Started by pnl-bot-update.path. Only ever runs `pnl --update`: the latest
+# GitHub release, checked against its SHA256SUMS. It restarts pnl-bot itself.
+[Service]
+Type=oneshot
+ExecStartPre=/bin/rm -f /var/lib/private/pnl-bot/update-request
+ExecStart=/usr/local/bin/pnl --update
+# On a failure, the end of this run's log goes where the bot reads it and
+# tells the owner (src/update.rs).
+ExecStopPost=/bin/sh -c '[ "$$SERVICE_RESULT" = success ] || journalctl _SYSTEMD_INVOCATION_ID="$$INVOCATION_ID" -o cat -n 5 --no-pager > /var/lib/private/pnl-bot/update-failed'
+TimeoutStartSec=5min

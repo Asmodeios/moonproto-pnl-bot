@@ -10,8 +10,10 @@ mod live;
 mod report;
 mod screens;
 mod unlock;
+mod update;
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -33,6 +35,10 @@ const GONE: &str = "That core is already gone.";
 
 fn cancel_kb() -> Value {
     json!([[button("✖ Cancel", "x")]])
+}
+
+fn menu_kb() -> Value {
+    json!([[button("⬅ Menu", "m")]])
 }
 
 /// A screen's text — a caption when it comes with an image — and its buttons.
@@ -78,6 +84,12 @@ pub struct Bot {
     /// Wrong passphrases in a row, and the pause they earned.
     unlock_fails: Mutex<(u32, Option<Instant>)>,
     status: Status,
+    /// Where an update request goes (crate::update).
+    data_dir: PathBuf,
+    /// A release newer than this build, once the check has found one.
+    latest: Mutex<Option<String>>,
+    /// An update was asked for and hasn't restarted the bot yet.
+    updating: AtomicBool,
 }
 
 impl Bot {
@@ -88,6 +100,7 @@ impl Bot {
         store: Arc<Store>,
         cores: Arc<Cores>,
         status: Status,
+        data_dir: PathBuf,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
@@ -104,6 +117,9 @@ impl Bot {
             cores_page: AtomicUsize::new(0),
             unlock_fails: Mutex::new((0, None)),
             status,
+            data_dir,
+            latest: Mutex::new(None),
+            updating: AtomicBool::new(false),
         })
     }
 
@@ -120,10 +136,13 @@ impl Bot {
         if let Err(e) = self.tg.set_commands(&commands).await {
             log::warn!("{e}");
         }
-        if let Some(owner) = self.store.owner().filter(|_| self.store.is_locked()) {
-            // A private chat's id is its user's.
-            if let Err(e) = self.tg.send(owner, LOCKED, Some(locked_kb())).await {
-                log::warn!("{e}");
+        // A private chat's id is its user's.
+        if let Some(owner) = self.store.owner() {
+            self.announce_update(owner).await;
+            if self.store.is_locked() {
+                if let Err(e) = self.tg.send(owner, LOCKED, Some(locked_kb())).await {
+                    log::warn!("{e}");
+                }
             }
         }
         let mut offset = 0;
@@ -257,6 +276,8 @@ impl Bot {
             // The old Month picker's button, still on messages sent before it went.
             "r:m" => self.report_screen(Period::Month, default_view(Period::Month)).await,
             "m" => self.main_screen().into(),
+            "u" => self.update_screen().into(),
+            "u:go" => self.start_update(msg.chat.id)?.into(),
             _ if let Some(page) = data.strip_prefix("c:p:") => {
                 self.cores_page.store(page.parse().unwrap_or(0), Ordering::Relaxed);
                 self.cores_screen(None)

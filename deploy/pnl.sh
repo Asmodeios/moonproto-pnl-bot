@@ -18,6 +18,7 @@ Usage: pnl <command>
 EOF
 }
 
+# Also `repository` in Cargo.toml, which the bot checks for new releases.
 REPO=Asmodeios/moonproto-pnl-bot
 
 # Downloads the latest release for this CPU, checks it against the release's

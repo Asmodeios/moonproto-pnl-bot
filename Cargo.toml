@@ -4,6 +4,7 @@ version = "0.1.7"
 description = "Telegram bot reporting PnL from MoonBot cores over MoonProto"
 authors = ["Asmodeios"]
 license = "MIT"
+repository = "https://github.com/Asmodeios/moonproto-pnl-bot"
 edition = "2021"
 # `if let` guards in match arms (src/bot/mod.rs) need a recent toolchain.
 rust-version = "1.96"

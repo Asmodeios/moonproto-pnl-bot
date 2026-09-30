@@ -13,6 +13,7 @@ mod status;
 mod store;
 mod table;
 mod telegram;
+mod update;
 
 use std::sync::Arc;
 
@@ -67,8 +68,9 @@ async fn run() -> Result<(), String> {
     }
     cores.supervise();
 
-    let bot = bot::Bot::new(tg, claim_code, cfg.report_offset_min, Arc::clone(&store), Arc::clone(&cores), status.clone());
+    let bot = bot::Bot::new(tg, claim_code, cfg.report_offset_min, Arc::clone(&store), Arc::clone(&cores), status.clone(), cfg.data_dir.clone());
     bot.live_trades(closed_rx);
+    bot.check_updates();
     let note = if locked { " — locked until the owner sends the passphrase" } else { "" };
     log::info!("@{username} started with {} core(s){note}", store.all().len());
     status.update(&store);

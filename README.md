@@ -121,7 +121,12 @@ Reports use the clock of the core. If your cores do not use UTC time, set `REPOR
 
 ### Update
 
-Run on the VPS:
+When a new version is out, the bot's main menu shows **⬆️ Update to vX.Y.Z** (it checks GitHub
+every hour). Press it and confirm: the server installs the update the same way as `pnl --update`
+and restarts the bot. The bot tells you when it is back. This button works on installs from version
+0.1.8 on; before that, update once with `pnl --update`.
+
+Or run on the VPS:
 
 ```sh
 pnl --update
