@@ -284,9 +284,18 @@ fn esc(s: &str) -> String {
 
 /// `$` for dollars and their stablecoins, the code otherwise.
 pub fn unit(currency: &str) -> String {
-    match currency.to_ascii_uppercase().as_str() {
-        "" | "USD" | "USDT" | "USDC" | "BUSD" | "FDUSD" | "TUSD" => "$".to_string(),
+    match ledger(currency).as_str() {
+        "USD" => "$".to_string(),
         other => format!(" {other}"),
+    }
+}
+
+/// The currency figures are summed in: dollars and their stablecoins are one
+/// `USD`, so a USDC core and a USDT one share a total.
+pub fn ledger(currency: &str) -> String {
+    match currency.to_ascii_uppercase().as_str() {
+        "" | "USD" | "USDT" | "USDC" | "BUSD" | "FDUSD" | "TUSD" => "USD".to_string(),
+        other => other.to_string(),
     }
 }
 

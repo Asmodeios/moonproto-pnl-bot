@@ -145,7 +145,7 @@ impl Bot {
         let mut groups: Vec<(f64, Vec<table::Row>)> = Vec::new();
         for (core, tally) in cores.iter().zip(tallies) {
             let exchange = self.cores.view(&core.id).and_then(|v| v.exchange).unwrap_or_default();
-            let cur = core.currency.clone();
+            let cur = table::ledger(&core.currency);
             let row = |sub: String, kind, tally| table::Row {
                 name: core.name.clone(),
                 sub,
@@ -187,7 +187,7 @@ impl Bot {
         let mut rows: Vec<table::Row> = groups.into_iter().flat_map(|(_, rows)| rows).collect();
         if cores.len() > 1 || rows.is_empty() {
             if real_total.is_empty() {
-                real_total.insert(cores.first().map(|c| c.currency.clone()).unwrap_or_default(), Tally::default());
+                real_total.insert(table::ledger(cores.first().map_or("", |c| &c.currency)), Tally::default());
             }
             rows.extend(total_rows(&real_total, &emu_total));
         }
@@ -229,7 +229,7 @@ fn date_rows(
                 continue;
             }
         };
-        let cur = &core.currency;
+        let cur = &table::ledger(&core.currency);
         for (day, CoreTally { real, emulator }) in daily {
             if real.trades > 0 {
                 days.entry((cur.clone(), day)).or_default().merge(&real);
@@ -253,7 +253,7 @@ fn date_rows(
     // ISO dates sort as text; stable, so a day's currencies keep their order.
     rows.sort_by(|a, b| b.name.cmp(&a.name));
     if real_total.is_empty() {
-        real_total.insert(cores.first().map(|c| c.currency.clone()).unwrap_or_default(), Tally::default());
+        real_total.insert(table::ledger(cores.first().map_or("", |c| &c.currency)), Tally::default());
     }
     rows.extend(total_rows(&real_total, &emu_total));
     rows
@@ -284,7 +284,7 @@ fn coin_rows(
             if !show_emu {
                 t.emulator = Tally::default();
             }
-            sums.entry((core.currency.clone(), coin)).or_default().add(&t);
+            sums.entry((table::ledger(&core.currency), coin)).or_default().add(&t);
         }
     }
     let mut coins: Vec<((String, String), CoreTally)> =
@@ -336,7 +336,7 @@ fn coin_rows(
         rows.extend(rows_of(format!("{n} others"), cur, t));
     }
     if real_total.is_empty() {
-        real_total.insert(cores.first().map(|c| c.currency.clone()).unwrap_or_default(), Tally::default());
+        real_total.insert(table::ledger(cores.first().map_or("", |c| &c.currency)), Tally::default());
     }
     rows.extend(total_rows(&real_total, &emu_total));
     rows
@@ -503,6 +503,45 @@ mod tests {
         assert!(shown.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
         assert!(shown.contains(&"C0") && !shown.contains(&"C15"), "{shown:?}");
         assert_eq!(&names[MAX_COIN_ROWS..], ["10 others", "TOTAL"]);
+    }
+
+    #[test]
+    fn dollar_stablecoins_share_rows_and_totals() {
+        let core = |id: &str, currency: &str| CoreEntry {
+            id: id.into(),
+            name: id.into(),
+            key: String::new(),
+            sealed_key: String::new(),
+            host: String::new(),
+            port: 0,
+            currency: currency.into(),
+        };
+        let real = |profit| CoreTally { real: Tally { trades: 1, wins: 1, profit, volume: 10.0 }, ..Default::default() };
+        let day = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let daily = |profit| Ok(Some(BTreeMap::from([(day, real(profit))])));
+        let cores = [core("bb", "USDT"), core("hl", "usdc"), core("btc", "BTC")];
+        let rows = date_rows(&cores, vec![daily(1.0), daily(2.0), daily(4.0)], true, &mut Vec::new());
+        let summary: Vec<(&str, &str, u32, f64)> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.currency.as_str(), r.tally.unwrap().trades, r.tally.unwrap().profit))
+            .collect();
+        // USDT and USDC in one day row and one total; BTC apart.
+        assert_eq!(
+            summary,
+            [
+                ("2026-09-01", "BTC", 1, 4.0),
+                ("2026-09-01", "USD", 2, 3.0),
+                ("TOTAL", "BTC", 1, 4.0),
+                ("TOTAL", "USD", 2, 3.0),
+            ]
+        );
+
+        let coins = |profit| Ok(Some(BTreeMap::from([("ETH".to_string(), real(profit))])));
+        let rows = coin_rows(&cores[..2], vec![coins(1.0), coins(2.0)], true, false, &mut Vec::new());
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["ETH", "TOTAL"]);
+        assert_eq!(rows[1].tally.unwrap().trades, 2);
+        assert_eq!(table::unit(&rows[1].currency), "$");
     }
 
     #[test]
