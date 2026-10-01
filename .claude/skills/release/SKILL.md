@@ -9,7 +9,8 @@ disable-model-invocation: true
 
 `.github/workflows/release.yml` runs on any pushed `v*` tag: it builds
 `pnl-bot-linux-x86_64.tar.gz` and `pnl-bot-linux-aarch64.tar.gz`, then creates a
-GitHub Release with both archives plus `SHA256SUMS`. The build **fails if the tag
+GitHub Release with both archives plus `SHA256SUMS`, and the tag's message as
+its notes. The build **fails if the tag
 does not equal `v` + the `version` in `Cargo.toml`**, so the version bump and the
 tag must always agree.
 
@@ -42,28 +43,52 @@ Stop and report if any of these fail:
   `cargo check` if offline fails). `Cargo.lock` must change only for `pnl-bot`.
 - Commit both files: `Release vX.Y.Z`.
 
-## 4. Confirm, then tag and push
+## 4. Write the changelog
+
+The annotated tag's message becomes the release notes: the workflow reads it
+and puts GitHub's compare link after it. Read the changes since the previous
+tag (`git log <prev>..HEAD`, and the diffs where a subject is unclear) and write
+a short Markdown list of what changed **for the user of the bot**:
+
+- Simple English for a non-native speaker: short sentences, common words, no
+  idioms, no internal names (functions, files, crates).
+- One line per change, starting with a verb: "Added …", "Fixed …", "Changed …".
+  Group small related commits into one line; leave out refactors, tests, CI and
+  version bumps unless they change what the user sees.
+- No headings: git drops lines starting with `#` unless told not to.
+
+Example:
+
+```markdown
+- Reports in text format now say "updated 5 mins ago" instead of the time, and this line updates by itself.
+- Fixed: the Month button did nothing on old messages.
+```
+
+Save it in the scratchpad as `notes-vX.Y.Z.md`.
+
+## 5. Confirm, then tag and push
 
 Pushing a tag publishes a public release, so show the user the version, the
-commits since the previous tag (`git log --oneline <prev>..HEAD`) and ask for
-confirmation before pushing — unless they already explicitly said to go ahead.
+commits since the previous tag (`git log --oneline <prev>..HEAD`) and the
+changelog, and ask for confirmation before pushing — unless they already
+explicitly said to go ahead.
 
 ```sh
-git tag -a vX.Y.Z -m "vX.Y.Z"
+git tag -a vX.Y.Z -F <scratchpad>/notes-vX.Y.Z.md --cleanup=whitespace
 git push origin master
 git push origin vX.Y.Z
 ```
 
 Push the branch before the tag so the tagged commit is on `master`.
 
-## 5. Watch the build and verify the release
+## 6. Watch the build and verify the release
 
 - Find the run: `gh run list --workflow release.yml --branch vX.Y.Z --limit 1`
   (the run can take a few seconds to appear), then `gh run watch <id> --exit-status`
   in the background.
 - On success, `gh release view vX.Y.Z` must list three assets:
-  `pnl-bot-linux-x86_64.tar.gz`, `pnl-bot-linux-aarch64.tar.gz`, `SHA256SUMS`.
-  Give the user the release URL.
+  `pnl-bot-linux-x86_64.tar.gz`, `pnl-bot-linux-aarch64.tar.gz`, `SHA256SUMS`,
+  and its notes must start with the changelog. Give the user the release URL.
 - On failure, show the failing step with `gh run view <id> --log-failed`. Do not
   delete or move the tag on your own; explain the options (fix and release the
   next patch version, or with the user's approval delete the tag/release with
