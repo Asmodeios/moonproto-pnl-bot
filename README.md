@@ -72,6 +72,10 @@ Send `/start` to open the menu.
     not sent, but they are still counted in the reports.
 
   The bot saves all settings. They stay after a restart.
+- **⬆️ Update to vX.Y.Z** — the bot checks GitHub for a new version when it starts and then every hour.
+  When there is one, this button shows in the main menu. Press it and confirm: the server installs the
+  new version and restarts the bot, and the bot tells you when it is back. If the update fails, the bot
+  tells you that too. See [Update](#update).
 
 Commands: `/menu`, `/hour`, `/today`, `/month`, `/cores`, `/settings`, `/cancel`.
 
