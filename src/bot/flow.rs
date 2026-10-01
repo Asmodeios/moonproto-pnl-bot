@@ -60,11 +60,7 @@ impl Bot {
             by_chat.entry(chat).or_default().push(id);
         }
         for (chat, ids) in by_chat {
-            for batch in ids.chunks(100) {
-                if let Err(e) = self.tg.delete_messages(chat, batch).await {
-                    log::warn!("{e}");
-                }
-            }
+            self.delete_messages(chat, &ids).await;
         }
     }
 

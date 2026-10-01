@@ -79,7 +79,8 @@ pub struct Row {
 pub struct Report {
     pub title: String,
     pub label: String,
-    pub updated: String,
+    /// When the report was drawn: the image shows the time, the text how long ago.
+    pub drawn: chrono::DateTime<chrono::Utc>,
     pub footer: String,
     pub by: By,
     pub rows: Vec<Row>,
@@ -94,6 +95,11 @@ fn fonts() -> &'static Arc<fontdb::Database> {
         db.load_font_source(fontdb::Source::Binary(Arc::new(BOLD)));
         Arc::new(db)
     })
+}
+
+/// The image's "updated" line: drawn in, so the time rather than an age.
+fn clock(report: &Report) -> String {
+    format!("updated {}", report.drawn.format("%H:%M:%S UTC"))
 }
 
 pub fn render(report: &Report) -> Result<Vec<u8>, String> {
@@ -202,7 +208,7 @@ fn svg(report: &Report) -> String {
     let title_w = PAD * 2.0
         + (report.title.chars().count() + report.label.chars().count() + 3) as f64 * 24.0 * ADVANCE
         + GAP
-        + report.updated.chars().count() as f64 * SUB * ADVANCE;
+        + clock(report).chars().count() as f64 * SUB * ADVANCE;
     let width = table_w.max(title_w).max(PAD * 2.0 + report.footer.chars().count() as f64 * SUB * ADVANCE).ceil();
     // Column i's anchor x: the left edge for CORE, the right edge for the rest.
     let mut xs = Vec::new();
@@ -228,7 +234,7 @@ fn svg(report: &Report) -> String {
         esc(&report.title),
         esc(&report.label)
     );
-    s += &text(width - PAD, title_y, SUB, DIM, "end", false, &report.updated);
+    s += &text(width - PAD, title_y, SUB, DIM, "end", false, &clock(report));
 
     let top = TITLE_H;
     s += &format!(r#"<rect y="{top}" width="{width}" height="{HEAD_H}" fill="{HEAD_BG}"/>"#);
@@ -345,7 +351,7 @@ mod tests {
         let by_date = Report {
             title: "Month".into(),
             label: "September 2026 · by date".into(),
-            updated: "updated 13:08:25 UTC".into(),
+            drawn: "2026-09-24T13:08:25Z".parse().unwrap(),
             footer: "Closed trades by close time, UTC".into(),
             by: By::Date,
             rows: vec![
@@ -365,7 +371,7 @@ mod tests {
         let report = Report {
             title: "Month".into(),
             label: "September 2026".into(),
-            updated: "updated 13:08:25 UTC".into(),
+            drawn: "2026-09-24T13:08:25Z".parse().unwrap(),
             footer: "Closed trades by close time, UTC".into(),
             by: By::Core,
             rows: vec![

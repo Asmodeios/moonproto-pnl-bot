@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::NaiveDate;
 use serde_json::{json, Value};
@@ -93,7 +94,7 @@ impl Bot {
         let report = table::Report {
             title: title.to_string(),
             label: label.clone(),
-            updated: format!("updated {}", chrono::Utc::now().format("%H:%M:%S UTC")),
+            drawn: chrono::Utc::now(),
             footer: format!("Closed trades by close time, {zone}"),
             by,
             rows,
@@ -110,9 +111,9 @@ impl Bot {
             text.push('\n');
         }
         if settings.report_format == ReportFormat::Text {
-            let table = report_text(&report);
-            let text = if text.is_empty() { table } else { format!("{table}\n\n{}", text.trim_end()) };
-            return Screen { text, kb, png: None, follow: Follow::No };
+            let aged = Aged { report, notes: text.trim_end().to_string(), kb };
+            let screen = aged.screen();
+            return Screen { follow: Follow::Age(Box::new(aged)), ..screen };
         }
         let png = tokio::task::spawn_blocking(move || table::render(&report))
             .await
@@ -412,13 +413,62 @@ fn report_text(report: &table::Report) -> String {
         pre.push('\n');
     }
     format!(
-        "<b>{}</b> — {}\n<pre>{}</pre>\n<i>{}</i>",
+        "<b>{}</b> — {}\n<pre>{}</pre>\n<i>updated {}</i>",
         escape(&report.title),
         escape(&report.label),
         // Only the newline: a TOTAL row's blank last cell is padding that lines up.
         escape(pre.trim_end_matches('\n')),
-        escape(&report.updated)
+        age(since(report.drawn))
     )
+}
+
+/// A text report with its notes and buttons, kept to be redrawn as it ages.
+pub(super) struct Aged {
+    report: table::Report,
+    notes: String,
+    kb: Value,
+}
+
+impl Aged {
+    pub(super) fn screen(&self) -> Screen {
+        let table = report_text(&self.report);
+        let text = if self.notes.is_empty() { table } else { format!("{table}\n\n{}", self.notes) };
+        Screen { text, kb: self.kb.clone(), png: None, follow: Follow::No }
+    }
+
+    pub(super) fn elapsed(&self) -> Duration {
+        since(self.report.drawn)
+    }
+}
+
+/// The time since `at`; none for a time ahead of the clock.
+fn since(at: chrono::DateTime<chrono::Utc>) -> Duration {
+    (chrono::Utc::now() - at).to_std().unwrap_or_default()
+}
+
+/// How long ago a report was drawn, as its last line says it:
+/// "just now", "5 mins ago", "3 hours ago", "2 days ago".
+fn age(elapsed: Duration) -> String {
+    let mins = elapsed.as_secs() / 60;
+    match mins {
+        0 => "just now".to_string(),
+        1 => "1 min ago".to_string(),
+        2..60 => format!("{mins} mins ago"),
+        60..120 => "1 hour ago".to_string(),
+        120..2880 => format!("{} hours ago", mins / 60),
+        _ => format!("{} days ago", mins / 1440),
+    }
+}
+
+/// When `age` next reads differently, as time since the report was drawn.
+pub(super) fn next_age(elapsed: Duration) -> Duration {
+    let mins = elapsed.as_secs() / 60;
+    let step = match mins {
+        0..60 => 1,
+        60..2880 => 60,
+        _ => 1440,
+    };
+    Duration::from_secs((mins / step + 1) * step * 60)
 }
 
 /// The layouts `period`'s report comes in.
@@ -545,6 +595,21 @@ mod tests {
     }
 
     #[test]
+    fn ages_read_and_step() {
+        let m = |mins: u64| Duration::from_secs(mins * 60);
+        let ages = [0, 1, 59, 60, 119, 120, 2879, 2880].map(|x| age(m(x)));
+        assert_eq!(
+            ages,
+            ["just now", "1 min ago", "59 mins ago", "1 hour ago", "1 hour ago", "2 hours ago", "47 hours ago", "2 days ago"]
+        );
+        assert_eq!(next_age(Duration::from_secs(30)), m(1));
+        assert_eq!(next_age(m(59)), m(60));
+        assert_eq!(next_age(m(61)), m(120));
+        assert_eq!(next_age(m(2879)), m(2880));
+        assert_eq!(next_age(m(2880)), m(4320));
+    }
+
+    #[test]
     fn text_report_lines_align() {
         let t = |trades, wins, profit, volume| Some(Tally { trades, wins, profit, volume });
         let row = |name: &str, sub: &str, kind, tally| table::Row {
@@ -566,7 +631,7 @@ mod tests {
         let by_date = table::Report {
             title: "Month".into(),
             label: "September 2026 · by date".into(),
-            updated: "updated 13:08:25 UTC".into(),
+            drawn: "2026-09-24T13:08:25Z".parse().unwrap(),
             footer: "Closed trades by close time, UTC".into(),
             by: By::Date,
             rows: vec![
@@ -580,7 +645,7 @@ mod tests {
         let report = table::Report {
             title: "Month".into(),
             label: "September 2026".into(),
-            updated: "updated 13:08:25 UTC".into(),
+            drawn: "2026-09-24T13:08:25Z".parse().unwrap(),
             footer: "Closed trades by close time, UTC".into(),
             by: By::Core,
             rows: vec![

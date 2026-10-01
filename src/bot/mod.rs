@@ -12,6 +12,7 @@ mod screens;
 mod unlock;
 mod update;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -26,7 +27,8 @@ use crate::store::{ReportFormat, Store};
 use crate::telegram::{button, escape, CallbackQuery, Message, Tg, Update};
 
 use flow::Pending;
-use live::Live;
+use live::Kept;
+use report::Aged;
 use report::{default_view, REPORTS, SORT_PREFIX};
 use unlock::{locked_kb, LOCKED};
 
@@ -60,6 +62,8 @@ enum Follow {
     No,
     /// The Cores screen, redrawn with its note while a core is settling.
     Cores(Option<String>),
+    /// A text report, redrawn as its "updated … ago" changes.
+    Age(Box<Aged>),
 }
 
 pub struct Bot {
@@ -74,7 +78,11 @@ pub struct Bot {
     /// The add-core conversation's messages as `(chat, id)` — its prompts and
     /// the owner's answers — deleted together when it ends.
     trail: Mutex<Vec<(i64, i64)>>,
-    live: Mutex<Option<Live>>,
+    /// The messages being kept current (live.rs), as `(chat, id)`.
+    kept: Mutex<HashMap<(i64, i64), Kept>>,
+    /// The screens shown since the last new one, and the messages that asked
+    /// for them, as `(chat, id)`: deleted when the next new screen is sent.
+    shown: Mutex<Vec<(i64, i64)>>,
     live_seq: AtomicU64,
     /// Held across a live screen's check and edit, and while a button takes
     /// its message over — so a late refresh never overwrites the new screen.
@@ -111,7 +119,8 @@ impl Bot {
             cores,
             pending: Mutex::new(None),
             trail: Mutex::new(Vec::new()),
-            live: Mutex::new(None),
+            kept: Mutex::new(HashMap::new()),
+            shown: Mutex::new(Vec::new()),
             live_seq: AtomicU64::new(0),
             screen_lock: tokio::sync::Mutex::new(()),
             cores_page: AtomicUsize::new(0),
@@ -208,13 +217,14 @@ impl Bot {
                 "settings" => self.settings_screen().into(),
                 _ => self.main_screen().into(),
             };
+            self.remember(chat, msg.message_id);
             return self.show(chat, None, screen).await;
         }
         match self.take_pending() {
             Some(p) => self.on_pending(chat, msg.message_id, p, text).await,
             None => {
-                let (text, kb) = self.main_screen();
-                self.tg.send(chat, &text, Some(kb)).await
+                self.remember(chat, msg.message_id);
+                self.show(chat, None, self.main_screen().into()).await
             }
         }
     }
@@ -354,9 +364,10 @@ impl Bot {
         self.show(msg.chat.id, Some(msg), screen).await.map(|_| ())
     }
 
-    /// Show `screen` in `current`'s place, or as a new message. A text
-    /// message can't become a photo or back, so crossing over sends the new
-    /// one and deletes the old. A Cores screen is then kept current.
+    /// Show `screen` in `current`'s place, or as a new message that replaces
+    /// every screen before it. A text message can't become a photo or back,
+    /// so crossing over sends the new one and deletes the old. A Cores
+    /// screen, or a text report's age, is then kept current.
     async fn show(&self, chat: i64, current: Option<&Message>, screen: Screen) -> Result<(), String> {
         let Screen { text, kb, png, follow } = screen;
         let was_photo = current.is_some_and(|m| m.photo.is_some());
@@ -372,14 +383,54 @@ impl Bot {
             (_, Some(png)) => self.tg.send_photo(chat, png, &text, Some(kb)).await?,
             (_, None) => self.tg.send_id(chat, &text, Some(kb)).await?,
         };
-        if let Some(m) = current.filter(|m| m.message_id != id) {
-            if let Err(e) = self.tg.delete_message(chat, m.message_id).await {
+        // A new message clears the chat of the screens before it.
+        let old = match current {
+            Some(m) if m.message_id != id => vec![m.message_id],
+            Some(_) => Vec::new(),
+            None => self.take_shown(chat),
+        };
+        self.forget(chat, &old);
+        self.delete_messages(chat, &old).await;
+        self.remember(chat, id);
+        self.keep_current(chat, id, follow, text);
+        Ok(())
+    }
+
+    /// A screen, or the message that asked for one, to delete when a new
+    /// screen is sent.
+    fn remember(&self, chat: i64, message_id: i64) {
+        if let Ok(mut shown) = self.shown.lock() {
+            if !shown.contains(&(chat, message_id)) {
+                shown.push((chat, message_id));
+            }
+        }
+    }
+
+    fn take_shown(&self, chat: i64) -> Vec<i64> {
+        let Ok(mut shown) = self.shown.lock() else {
+            return Vec::new();
+        };
+        let (taken, kept) = shown.drain(..).partition(|&(c, _)| c == chat);
+        *shown = kept;
+        taken.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+    }
+
+    /// Stop remembering and keeping current messages about to be deleted.
+    fn forget(&self, chat: i64, ids: &[i64]) {
+        if let Ok(mut shown) = self.shown.lock() {
+            shown.retain(|(c, id)| *c != chat || !ids.contains(id));
+        }
+        if let Ok(mut kept) = self.kept.lock() {
+            kept.retain(|(c, id), _| *c != chat || !ids.contains(id));
+        }
+    }
+
+    /// Delete messages of one chat, 100 to a call; failures are only logged.
+    async fn delete_messages(&self, chat: i64, ids: &[i64]) {
+        for batch in ids.chunks(100) {
+            if let Err(e) = self.tg.delete_messages(chat, batch).await {
                 log::warn!("{e}");
             }
         }
-        if let Follow::Cores(note) = follow {
-            self.watch(chat, id, note, text);
-        }
-        Ok(())
     }
 }
