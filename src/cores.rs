@@ -154,6 +154,11 @@ impl Cores {
         })
     }
 
+    /// Whether the core is online: its link is ready.
+    pub fn online(&self, id: &str) -> bool {
+        self.sessions.lock().is_ok_and(|s| s.get(id).is_some_and(|s| s.link == Link::Ready))
+    }
+
     pub fn shutdown(&self) {
         let sessions: Vec<Session> = match self.sessions.lock() {
             Ok(mut s) => s.drain().map(|(_, v)| v).collect(),

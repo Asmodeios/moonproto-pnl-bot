@@ -70,6 +70,7 @@ async fn run() -> Result<(), String> {
 
     let bot = bot::Bot::new(tg, claim_code, cfg.report_offset_min, Arc::clone(&store), Arc::clone(&cores), status.clone(), cfg.data_dir.clone());
     bot.live_trades(closed_rx);
+    bot.watch_cores();
     bot.check_updates();
     let note = if locked { " — locked until the owner sends the passphrase" } else { "" };
     log::info!("@{username} started with {} core(s){note}", store.all().len());

@@ -210,7 +210,7 @@ async fn per_replica<T: Send + 'static>(
     out
 }
 
-/// A row per day with trades, newest first, summed over the cores, then the
+/// A row per day with trades, oldest first, summed over the cores, then the
 /// totals. Emulator trades show in the totals only.
 fn date_rows(
     cores: &[CoreEntry],
@@ -218,8 +218,9 @@ fn date_rows(
     show_emu: bool,
     notes: &mut Vec<String>,
 ) -> Vec<table::Row> {
-    // Keyed by currency first: a sum across currencies means nothing.
-    let mut days: BTreeMap<(String, NaiveDate), Tally> = BTreeMap::new();
+    // Keyed by day, so oldest first, and by currency: a sum across
+    // currencies means nothing.
+    let mut days: BTreeMap<(NaiveDate, String), Tally> = BTreeMap::new();
     let mut real_total: BTreeMap<String, Tally> = BTreeMap::new();
     let mut emu_total: BTreeMap<String, Tally> = BTreeMap::new();
     for (core, daily) in cores.iter().zip(dailies) {
@@ -233,7 +234,7 @@ fn date_rows(
         let cur = &table::ledger(&core.currency);
         for (day, CoreTally { real, emulator }) in daily {
             if real.trades > 0 {
-                days.entry((cur.clone(), day)).or_default().merge(&real);
+                days.entry((day, cur.clone())).or_default().merge(&real);
                 real_total.entry(cur.clone()).or_default().merge(&real);
             }
             if show_emu && emulator.trades > 0 {
@@ -243,7 +244,7 @@ fn date_rows(
     }
     let mut rows: Vec<table::Row> = days
         .into_iter()
-        .map(|((currency, day), t)| table::Row {
+        .map(|((day, currency), t)| table::Row {
             name: day.format("%Y-%m-%d").to_string(),
             sub: String::new(),
             kind: table::Kind::Core,
@@ -251,8 +252,6 @@ fn date_rows(
             currency,
         })
         .collect();
-    // ISO dates sort as text; stable, so a day's currencies keep their order.
-    rows.sort_by(|a, b| b.name.cmp(&a.name));
     if real_total.is_empty() {
         real_total.insert(table::ledger(cores.first().map_or("", |c| &c.currency)), Tally::default());
     }

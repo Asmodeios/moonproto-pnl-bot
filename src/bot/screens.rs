@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
+use super::offline::OFFLINE_AFTER_MIN;
 use super::report::{period_button, PERIODS};
 use super::{Bot, Follow, Screen};
 use crate::cores::{self, CoreView, Link};
@@ -22,10 +23,7 @@ impl Bot {
 
     pub(super) fn main_screen(&self) -> (String, Value) {
         let cores = self.store.all();
-        let online = cores
-            .iter()
-            .filter(|c| self.cores.view(&c.id).is_some_and(|v| v.link == Link::Ready))
-            .count();
+        let online = cores.iter().filter(|c| self.cores.online(&c.id)).count();
         let body = if cores.is_empty() {
             "No cores yet — add one under 🖥 Cores.".to_string()
         } else {
@@ -46,20 +44,25 @@ impl Bot {
         let show = settings.show_emulator;
         let image = settings.report_format == ReportFormat::Image;
         let live = settings.live_trades;
+        let offline = settings.notify_offline;
+        let offline_on = format!("on — after {OFFLINE_AFTER_MIN} min offline, and when it's back");
         let text = format!(
             "<b>⚙️ Settings</b>\n\n🧪 Emulator trades: <b>{}</b> in reports\n📄 Reports come as: <b>{}</b>\n\
-             🔔 Live trades: <b>{}</b>",
+             🔔 Live trades: <b>{}</b>\n🚨 Notify offline core: <b>{}</b>",
             if show { "shown" } else { "hidden" },
             if image { "an image" } else { "text" },
-            if live { "on — a message for each closed trade" } else { "off" }
+            if live { "on — a message for each closed trade" } else { "off" },
+            if offline { offline_on.as_str() } else { "off" }
         );
         let emu = if show { "🙈 Hide emulator trades" } else { "🧪 Show emulator trades" };
         let format = if image { "📝 Send reports as text" } else { "🖼 Send reports as an image" };
         let live = if live { "🔕 Turn live trades off" } else { "🔔 Turn live trades on" };
+        let offline = if offline { "🔕 Don't notify about offline cores" } else { "🚨 Notify about offline cores" };
         let kb = json!([
             [button(emu, "s:emu")],
             [button(format, "s:fmt")],
             [button(live, "s:live")],
+            [button(offline, "s:offline")],
             [button("⬅ Menu", "m")]
         ]);
         (text, kb)

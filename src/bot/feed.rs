@@ -16,9 +16,6 @@ use crate::telegram::escape;
 const LIVE_TRADE_MAX_AGE_MS: i64 = 10 * 60_000;
 /// How long the closes after the first are collected before sending.
 const LIVE_WINDOW: Duration = Duration::from_secs(2);
-/// Room under Telegram's 4096-character message limit; a longer batch is
-/// split between trades.
-const MESSAGE_BUDGET: usize = 4000;
 
 impl Bot {
     /// Send the owner the trades the cores close, while Live trades is on.
@@ -41,7 +38,7 @@ impl Bot {
                 };
                 let batch: Vec<String> = trades.iter().filter_map(|t| bot.live_text(t)).collect();
                 if !batch.is_empty() {
-                    bot.send_live(batch).await;
+                    bot.tell_owner(batch, "\n\n", "live trades").await;
                 }
             }
         });
@@ -60,32 +57,6 @@ impl Bot {
         let core = self.store.get(&trade.core_id)?;
         Some(trade_text(trade, &core))
     }
-
-    async fn send_live(&self, batch: Vec<String>) {
-        let Some(owner) = self.store.owner() else {
-            return;
-        };
-        for message in messages(batch) {
-            if let Err(e) = self.tg.send(owner, &message, None).await {
-                log::warn!("live trades: {e}");
-            }
-        }
-    }
-}
-
-/// The trades' texts joined into as few messages as fit the budget.
-fn messages(texts: Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for text in texts {
-        match out.last_mut() {
-            Some(last) if last.chars().count() + 2 + text.chars().count() <= MESSAGE_BUDGET => {
-                last.push_str("\n\n");
-                last.push_str(&text);
-            }
-            _ => out.push(text),
-        }
-    }
-    out
 }
 
 /// A closed trade as the Live trades feed sends it.
@@ -125,7 +96,7 @@ fn trade_text(t: &ClosedTrade, core: &CoreEntry) -> String {
 }
 
 /// `42s`, `3m 05s`, `2h 10m`, `1d 4h`.
-fn duration(ms: i64) -> String {
+pub(super) fn duration(ms: i64) -> String {
     let s = ms / 1000;
     if s < 60 {
         format!("{s}s")
@@ -141,6 +112,7 @@ fn duration(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bot::{messages, MESSAGE_BUDGET};
 
     #[test]
     fn live_trade_text() {
@@ -179,10 +151,10 @@ mod tests {
         };
         assert!(trade_text(&liquidated, &core).ends_with("\nMR FOLKS 5.86% LONG"));
 
-        let joined = messages(vec![one.clone(), one.clone()]);
+        let joined = messages(vec![one.clone(), one.clone()], "\n\n");
         assert_eq!(joined, vec![format!("{one}\n\n{one}")]);
         // A batch past the budget splits between trades, never inside one.
-        let many = messages(vec![one.clone(); 60]);
+        let many = messages(vec![one.clone(); 60], "\n\n");
         assert!(many.len() > 1);
         assert!(many.iter().all(|m| m.chars().count() <= MESSAGE_BUDGET && m.starts_with("🔴")));
         assert_eq!(many.iter().map(|m| m.matches("FOLKS").count()).sum::<usize>(), 120);

@@ -26,7 +26,7 @@ Send `/start` to open the menu.
   - **🪙 By coin** — all cores added together, one row for each coin. The coins with the biggest profit
     or loss are first. Emulator trades of a coin are shown in a separate row under it. If there are more
     than 20 coins, the table shows 20 of them, and one row ("N others") with the sum of the rest.
-  - **📆 By date** — all cores added together, one row for each day with trades. The newest day is first.
+  - **📆 By date** — all cores added together, one row for each day with trades. The newest day is last, just above the total.
     Each row has: orders, wins/losses, volume and profit. The last row is the total for the month.
     Emulator trades are shown only in a separate total row.
 
@@ -70,6 +70,11 @@ Send `/start` to open the menu.
     trades at once do not make many messages. Emulator trades come only if they are shown in reports.
     Trades that closed more than 10 minutes ago (for example, while the core or the bot was offline) are
     not sent, but they are still counted in the reports.
+  - **Notify offline core:** on or off (default off). When it is on, the bot sends you a message when a
+    core that was online stays offline for 1 minute, and one more message when the core is back, with
+    how long it was offline. A short drop, like a quick restart of the core, does not make a message.
+    Cores that go offline at the same time come in one message. A core that is already offline when the
+    bot starts is not reported: see its state under **🖥 Cores**.
 
   The bot saves all settings. They stay after a restart.
 - **⬆️ Update to vX.Y.Z** — the bot checks GitHub for a new version when it starts and then every hour.
@@ -288,6 +293,7 @@ Then run `cargo run --release`.
    It does not ask the core, so the answer is fast.
 4. **Answer.** The bot gets your commands and button presses from Telegram and sends back the report
    as text or a table picture. With **Live trades** on, it also sends a message when a trade closes.
+   With **Notify offline core** on, it tells you when a core goes offline and when it is back.
 
 The MoonProto library is fixed to one commit in `Cargo.toml`.
 

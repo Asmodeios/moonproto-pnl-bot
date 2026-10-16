@@ -53,6 +53,8 @@ pub struct Settings {
     pub live_trades: bool,
     /// By core and by coin reports in name order rather than by profit.
     pub sort_by_name: bool,
+    /// A message when a core that was online stays offline, and when it is back.
+    pub notify_offline: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

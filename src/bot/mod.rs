@@ -7,6 +7,7 @@
 mod feed;
 mod flow;
 mod live;
+mod offline;
 mod report;
 mod screens;
 mod unlock;
@@ -34,6 +35,9 @@ use unlock::{locked_kb, LOCKED};
 
 /// The note for a core deleted while its screen was open.
 const GONE: &str = "That core is already gone.";
+/// Room under Telegram's 4096-character message limit; a longer batch is
+/// split between its texts.
+const MESSAGE_BUDGET: usize = 4000;
 
 fn cancel_kb() -> Value {
     json!([[button("✖ Cancel", "x")]])
@@ -320,6 +324,10 @@ impl Bot {
                 self.store.edit_settings(|s| s.live_trades = !s.live_trades)?;
                 self.settings_screen().into()
             }
+            "s:offline" => {
+                self.store.edit_settings(|s| s.notify_offline = !s.notify_offline)?;
+                self.settings_screen().into()
+            }
             "s:fmt" => {
                 self.store.edit_settings(|s| {
                     s.report_format = match s.report_format {
@@ -433,4 +441,32 @@ impl Bot {
             }
         }
     }
+
+    /// Send the owner `texts`, joined by `sep` into as few messages as fit;
+    /// failures are only logged, under `what`.
+    async fn tell_owner(&self, texts: Vec<String>, sep: &str, what: &str) {
+        let Some(owner) = self.store.owner() else {
+            return;
+        };
+        for message in messages(texts, sep) {
+            if let Err(e) = self.tg.send(owner, &message, None).await {
+                log::warn!("{what}: {e}");
+            }
+        }
+    }
+}
+
+/// The texts joined by `sep` into as few messages as fit the budget.
+fn messages(texts: Vec<String>, sep: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for text in texts {
+        match out.last_mut() {
+            Some(last) if last.chars().count() + sep.chars().count() + text.chars().count() <= MESSAGE_BUDGET => {
+                last.push_str(sep);
+                last.push_str(&text);
+            }
+            _ => out.push(text),
+        }
+    }
+    out
 }
