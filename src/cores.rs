@@ -279,6 +279,13 @@ fn stop(session: Option<Session>) {
     });
 }
 
+/// The bot's mark in the top 16 bits of every session's client id. A core's
+/// log names each client by that id in hex, so the bot's sessions read
+/// `[5042…]` there ("PB") and can be told from other clients by sight —
+/// Market Radar's read `[4D52…]`. The low 48 bits stay the crate's random
+/// draw, so every session is still a client of its own on the core.
+const CLIENT_ID_MARK: u64 = 0x5042 << 48;
+
 /// The endpoint the entry overrides, else the one the key export carries.
 fn client_config(entry: &CoreEntry) -> Result<ClientConfig, String> {
     let info = parse_key_info(entry.key.trim()).ok_or("the stored key is not a MoonBot key export")?;
@@ -289,7 +296,10 @@ fn client_config(entry: &CoreEntry) -> Result<ClientConfig, String> {
         port => port,
     };
     let mode = suggested.map(|n| n.transport_mode).unwrap_or(TransportMode::V0);
-    Ok(ClientConfig::new(host, port, info.keys.master_key, info.keys.mac_key)
+    let cfg = ClientConfig::new(host, port, info.keys.master_key, info.keys.mac_key);
+    let client_id = CLIENT_ID_MARK | (cfg.client_id & (u64::MAX >> 16));
+    Ok(cfg
+        .with_client_id(client_id)
         .with_transport_mode(mode)
         // Reports only: no market price refresh, no tag checks.
         .with_refresh(RefreshConfig { update_markets_every: None, check_tags_every: None }))

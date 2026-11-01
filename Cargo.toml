@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 # MoonBot's client SDK for its MoonProto UDP protocol. Not on crates.io and
 # untagged, so pinned to a commit.
-moonproto = { git = "https://github.com/Moonbot-Tech/MoonProto", rev = "793e9233cee9960f7e56c30f88556df23beb0823" }
+moonproto = { git = "https://github.com/Moonbot-Tech/MoonProto", rev = "33df8671da36fcbcab4c91af719df94eb173956f" }
 # `bundled` compiles SQLite in — no system library needed on the server.
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }

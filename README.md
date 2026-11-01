@@ -297,6 +297,9 @@ Then run `cargo run --release`.
 
 The MoonProto library is fixed to one commit in `Cargo.toml`.
 
+The bot's client number always starts with `5042`. A MoonBot core's log names each client by this number,
+so the bot's lines there look like `Srv: … from client [5042…]`. Market Radar's number starts with `4D52`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). MoonProto is Apache-2.0. The JetBrains Mono font is under the SIL Open Font License, see [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
